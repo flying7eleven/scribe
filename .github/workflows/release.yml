@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VERSION="$GITHUB_REF_NAME"
+          # Extract the section for this version (between its header and the next ## header)
+          NOTES=$(awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "\\[" ver "\\]") found=1; next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          # Strip trailing blank lines
+          NOTES=$(echo "$NOTES" | sed -e :a -e '/^[[:space:]]*$/{ $d; N; ba; }')
+          {
+            echo "RELEASE_NOTES<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ env.RELEASE_NOTES }}
+          files: target/release/scribe
