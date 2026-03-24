@@ -246,6 +246,34 @@ pub async fn query_sessions(
     Ok(rows)
 }
 
+/// Delete events with timestamp older than `before` (ISO 8601 UTC).
+/// Returns the number of deleted rows.
+#[allow(dead_code)] // Reused by auto-retention (E05-S04)
+pub async fn delete_events_before(
+    pool: &SqlitePool,
+    before: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let result = sqlx::query("DELETE FROM events WHERE timestamp < ?")
+        .bind(before)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Delete sessions that have no remaining events.
+/// Returns the number of deleted sessions.
+#[allow(dead_code)] // Reused by auto-retention (E05-S04)
+pub async fn delete_orphaned_sessions(
+    pool: &SqlitePool,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "DELETE FROM sessions WHERE session_id NOT IN (SELECT DISTINCT session_id FROM events)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +803,57 @@ mod tests {
         let sessions = query_sessions(&pool, &filter).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "s2");
+    }
+
+    // ── Delete/retain tests ──
+
+    #[tokio::test]
+    async fn test_delete_events_before() {
+        let (pool, _dir) = setup_filtered_db().await;
+        // Delete events before 11:30 — should remove the 10:00 and 11:00 events
+        let deleted = delete_events_before(&pool, "2025-01-01T11:30:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_events_before_no_matches() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let deleted = delete_events_before(&pool, "2020-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_orphaned_sessions() {
+        let (pool, _dir) = setup_filtered_db().await;
+        // Delete all events for s1 (timestamps 10:00 and 11:00)
+        delete_events_before(&pool, "2025-01-01T11:30:00.000Z")
+            .await
+            .unwrap();
+        // s1 should now be orphaned
+        let deleted = delete_orphaned_sessions(&pool).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1); // s2 still has events
+    }
+
+    #[tokio::test]
+    async fn test_delete_orphaned_sessions_no_orphans() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let deleted = delete_orphaned_sessions(&pool).await.unwrap();
+        assert_eq!(deleted, 0);
     }
 }

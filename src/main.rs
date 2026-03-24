@@ -235,8 +235,11 @@ async fn main() {
                 }
             }
         }
-        Commands::Retain { .. } => {
-            eprintln!("scribe retain: not yet implemented (db: {db_path})");
+        Commands::Retain { duration } => {
+            if let Err(e) = cmd_retain::run(&pool, &duration).await {
+                eprintln!("scribe: retain error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Stats => {
             eprintln!("scribe stats: not yet implemented (db: {db_path})");
