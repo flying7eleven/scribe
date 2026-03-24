@@ -84,8 +84,18 @@ async fn main() {
         Commands::Query => {
             eprintln!("scribe query: not yet implemented (db: {db_path})");
         }
-        Commands::Init { .. } => {
-            eprintln!("scribe init: not yet implemented");
+        Commands::Init { project, global } => {
+            let target = if project {
+                cmd_init::OutputTarget::Project
+            } else if global {
+                cmd_init::OutputTarget::Global
+            } else {
+                cmd_init::OutputTarget::Stdout
+            };
+            if let Err(e) = cmd_init::run(target, None) {
+                eprintln!("scribe: init error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Retain { .. } => {
             eprintln!("scribe retain: not yet implemented (db: {db_path})");

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde_json::{json, Value};
 
 /// Hook events and whether they support the `matcher` field.
@@ -27,11 +29,13 @@ const HOOK_EVENTS: &[(&str, bool)] = &[
     ("TaskCompleted", false),
 ];
 
+pub enum OutputTarget {
+    Stdout,
+    Project,
+    Global,
+}
+
 /// Generate the complete hooks configuration as a serde_json::Value.
-///
-/// Pure function — no I/O. Output modes (stdout, file write) are handled by the
-/// init handler (E03-S02).
-#[allow(dead_code)] // Wired in by E03-S02 (init handler)
 pub fn generate_hooks_config() -> Value {
     let mut hooks = serde_json::Map::new();
 
@@ -59,16 +63,123 @@ pub fn generate_hooks_config() -> Value {
     json!({ "hooks": hooks })
 }
 
+/// Run the init handler: generate hooks config and output to the selected target.
+///
+/// `home_override` replaces `dirs::home_dir()` for testing (avoids writing to real home).
+pub fn run(
+    target: OutputTarget,
+    home_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = generate_hooks_config();
+
+    match target {
+        OutputTarget::Stdout => {
+            println!("{}", serde_json::to_string_pretty(&config)?);
+        }
+        OutputTarget::Project => {
+            let path = PathBuf::from(".claude/settings.json");
+            merge_and_write(&path, &config)?;
+            eprintln!("scribe: wrote hooks to .claude/settings.json");
+        }
+        OutputTarget::Global => {
+            let home = match home_override {
+                Some(h) => h,
+                None => dirs::home_dir().ok_or("could not determine home directory")?,
+            };
+            let path = home.join(".claude").join("settings.json");
+            merge_and_write(&path, &config)?;
+            eprintln!("scribe: wrote hooks to {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+/// Merge scribe's hooks into an existing settings file, or create a new one.
+fn merge_and_write(path: &PathBuf, config: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut existing: Value = if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "existing file {} contains invalid JSON: {e}",
+                path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+
+    // Merge hooks
+    let generated_hooks = config["hooks"].as_object().unwrap();
+
+    let existing_obj = existing
+        .as_object_mut()
+        .ok_or("existing settings file is not a JSON object")?;
+
+    // Ensure "hooks" key exists as an object
+    if !existing_obj.contains_key("hooks") {
+        existing_obj.insert("hooks".to_string(), json!({}));
+    }
+
+    let existing_hooks = existing_obj["hooks"]
+        .as_object_mut()
+        .ok_or("existing 'hooks' key is not a JSON object")?;
+
+    for (event_name, generated_entries) in generated_hooks {
+        let generated_entry = &generated_entries[0]; // scribe's single entry for this event
+
+        if let Some(existing_array) = existing_hooks.get_mut(event_name) {
+            if let Some(arr) = existing_array.as_array_mut() {
+                // Find and replace existing scribe entry, or append
+                let scribe_idx = arr.iter().position(is_scribe_entry);
+                if let Some(idx) = scribe_idx {
+                    arr[idx] = generated_entry.clone();
+                } else {
+                    arr.push(generated_entry.clone());
+                }
+            }
+        } else {
+            // Event not present in existing file — add it
+            existing_hooks.insert(event_name.clone(), json!([generated_entry]));
+        }
+    }
+
+    // Write back with pretty-printing
+    let output = serde_json::to_string_pretty(&existing)?;
+    std::fs::write(path, output + "\n")?;
+
+    Ok(())
+}
+
+/// Check if a hook entry is a scribe entry (command starts with "scribe log").
+fn is_scribe_entry(entry: &Value) -> bool {
+    entry["hooks"]
+        .as_array()
+        .map(|hooks| {
+            hooks.iter().any(|h| {
+                h["command"]
+                    .as_str()
+                    .is_some_and(|cmd| cmd.starts_with("scribe log"))
+            })
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ── S01 tests (JSON generation) ──
+
     #[test]
     fn test_generates_valid_json() {
         let config = generate_hooks_config();
-        // Should be serializable without error
         let json_str = serde_json::to_string_pretty(&config).unwrap();
-        // And parseable back
         let _: Value = serde_json::from_str(&json_str).unwrap();
     }
 
@@ -175,5 +286,176 @@ mod tests {
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(key.as_str(), expected[i], "Event at position {i} mismatch");
         }
+    }
+
+    // ── S02 tests (output modes & merge) ──
+
+    #[test]
+    fn test_new_file_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("settings.json");
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+
+        assert!(path.exists());
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn test_merge_preserves_non_hooks_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Write existing file with non-hooks keys
+        std::fs::write(&path, r#"{"permissions":{"allow":["Bash"]},"hooks":{}}"#).unwrap();
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Non-hooks keys preserved
+        assert!(content["permissions"]["allow"].is_array());
+        // Hooks added
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn test_merge_preserves_non_scribe_event_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Existing file with a custom event hook (not in scribe's 21)
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"WorktreeCreate":[{"hooks":[{"type":"command","command":"my-worktree-handler"}]}]}}"#,
+        )
+        .unwrap();
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = content["hooks"].as_object().unwrap();
+        // WorktreeCreate preserved (not in scribe's list)
+        assert!(hooks.contains_key("WorktreeCreate"));
+        // Scribe's 21 events added
+        assert!(hooks.contains_key("PreToolUse"));
+        assert_eq!(hooks.len(), 22); // 21 scribe + 1 custom
+    }
+
+    #[test]
+    fn test_merge_preserves_non_scribe_hooks_on_same_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Existing file with a user hook on PreToolUse alongside scribe's
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-linter"}]},{"matcher":"*","hooks":[{"type":"command","command":"scribe log","timeout":10}]}]}}"#,
+        )
+        .unwrap();
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre_tool_use = content["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // Both entries present
+        assert_eq!(pre_tool_use.len(), 2);
+        // User's linter hook preserved
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"].as_str(),
+            Some("my-linter")
+        );
+        // Scribe's hook updated in-place
+        assert_eq!(
+            pre_tool_use[1]["hooks"][0]["command"].as_str(),
+            Some("scribe log")
+        );
+    }
+
+    #[test]
+    fn test_merge_appends_when_no_scribe_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Existing file with only a user hook on PreToolUse (no scribe)
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-linter"}]}]}}"#,
+        )
+        .unwrap();
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre_tool_use = content["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // User hook + scribe hook appended
+        assert_eq!(pre_tool_use.len(), 2);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"].as_str(),
+            Some("my-linter")
+        );
+        assert_eq!(
+            pre_tool_use[1]["hooks"][0]["command"].as_str(),
+            Some("scribe log")
+        );
+    }
+
+    #[test]
+    fn test_merge_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let config = generate_hooks_config();
+        merge_and_write(&path, &config).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        merge_and_write(&path, &config).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            first, second,
+            "Running init twice should produce identical output"
+        );
+    }
+
+    #[test]
+    fn test_invalid_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        std::fs::write(&path, "not json {{{").unwrap();
+
+        let config = generate_hooks_config();
+        let result = merge_and_write(&path, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid JSON"));
+
+        // File should not be overwritten
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json {{{");
+    }
+
+    #[test]
+    fn test_run_global_with_home_override() {
+        let dir = tempfile::tempdir().unwrap();
+        run(OutputTarget::Global, Some(dir.path().to_path_buf())).unwrap();
+
+        let path = dir.path().join(".claude").join("settings.json");
+        assert!(path.exists());
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 21);
     }
 }
