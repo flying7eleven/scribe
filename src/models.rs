@@ -5,7 +5,6 @@ use serde::Deserialize;
 /// Flat struct with `Option<T>` for all event-specific fields. Only the common
 /// fields (`session_id`, `hook_event_name`, `cwd`) are required; everything
 /// else is optional. Unknown fields are silently ignored by serde.
-#[allow(dead_code)] // Used by cmd_log — wired in by E02-S02
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct HookInput {

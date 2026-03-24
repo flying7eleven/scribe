@@ -48,7 +48,6 @@ pub fn resolve_db_path(cli_db: Option<&str>) -> Result<String, Box<dyn std::erro
 /// - 5-second busy timeout
 /// - Pool of 1 connection
 /// - Embedded migrations applied automatically
-#[allow(dead_code)] // Wired in by E02 (cmd_log)
 pub async fn connect(db_path: &str) -> Result<SqlitePool, Box<dyn std::error::Error>> {
     // Ensure parent directory exists
     if let Some(parent) = PathBuf::from(db_path).parent() {
@@ -73,7 +72,7 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, Box<dyn std::error::Er
 }
 
 /// Insert an event into `events` and upsert `sessions` in a single transaction.
-#[allow(dead_code, clippy::too_many_arguments)] // Wired in by E02 (cmd_log)
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_event(
     pool: &SqlitePool,
     session_id: &str,

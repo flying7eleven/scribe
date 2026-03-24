@@ -70,7 +70,16 @@ async fn main() {
 
     match cli.command {
         Commands::Log => {
-            eprintln!("scribe log: not yet implemented (db: {db_path})");
+            let pool = match db::connect(&db_path).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("scribe: db connect error: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = cmd_log::run(&pool).await {
+                eprintln!("scribe: log error: {e}");
+            }
         }
         Commands::Query => {
             eprintln!("scribe query: not yet implemented (db: {db_path})");
