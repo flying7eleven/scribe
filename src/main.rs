@@ -242,7 +242,10 @@ async fn main() {
             }
         }
         Commands::Stats => {
-            eprintln!("scribe stats: not yet implemented (db: {db_path})");
+            if let Err(e) = cmd_stats::run(&pool, &db_path).await {
+                eprintln!("scribe: stats error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Init { .. } | Commands::Completions { .. } => unreachable!(),
     }

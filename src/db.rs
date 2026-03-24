@@ -274,6 +274,37 @@ pub async fn delete_orphaned_sessions(
     Ok(result.rows_affected())
 }
 
+/// Database metrics.
+pub struct DbStats {
+    pub event_count: i64,
+    pub session_count: i64,
+    pub oldest_event: Option<String>,
+    pub newest_event: Option<String>,
+}
+
+/// Get database metrics.
+pub async fn get_stats(pool: &SqlitePool) -> Result<DbStats, Box<dyn std::error::Error>> {
+    let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(pool)
+        .await?;
+    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(pool)
+        .await?;
+    let oldest_event: Option<String> = sqlx::query_scalar("SELECT MIN(timestamp) FROM events")
+        .fetch_one(pool)
+        .await?;
+    let newest_event: Option<String> = sqlx::query_scalar("SELECT MAX(timestamp) FROM events")
+        .fetch_one(pool)
+        .await?;
+
+    Ok(DbStats {
+        event_count,
+        session_count,
+        oldest_event,
+        newest_event,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
