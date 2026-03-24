@@ -59,21 +59,30 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
+    let cli_db = cli.db.as_ref().and_then(|p| p.to_str());
+    let db_path = match db::resolve_db_path(cli_db) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("scribe: failed to resolve database path: {e}");
+            return;
+        }
+    };
+
     match cli.command {
         Commands::Log => {
-            eprintln!("scribe log: not yet implemented");
+            eprintln!("scribe log: not yet implemented (db: {db_path})");
         }
         Commands::Query => {
-            eprintln!("scribe query: not yet implemented");
+            eprintln!("scribe query: not yet implemented (db: {db_path})");
         }
         Commands::Init { .. } => {
             eprintln!("scribe init: not yet implemented");
         }
         Commands::Retain { .. } => {
-            eprintln!("scribe retain: not yet implemented");
+            eprintln!("scribe retain: not yet implemented (db: {db_path})");
         }
         Commands::Stats => {
-            eprintln!("scribe stats: not yet implemented");
+            eprintln!("scribe stats: not yet implemented (db: {db_path})");
         }
         Commands::Completions { .. } => {
             eprintln!("scribe completions: not yet implemented");
