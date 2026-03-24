@@ -1,15 +1,25 @@
 use std::io::{self, IsTerminal, Read};
 
+use chrono::Utc;
 use sqlx::SqlitePool;
 
 use crate::db;
 use crate::models::HookInput;
 
+/// Retention config passed from main.rs.
+pub struct RetentionConfig {
+    pub retention: String,
+    pub check_interval: String,
+}
+
 /// Read hook JSON from stdin and insert into the database.
 ///
 /// Returns Ok(()) on success or if an error was handled gracefully.
 /// The caller should always exit 0 regardless of the result.
-pub async fn run(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    pool: &SqlitePool,
+    retention: Option<&RetentionConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // TTY detection: if stdin is a terminal, print hint and return
     if io::stdin().is_terminal() {
         eprintln!("scribe log: reads hook JSON from stdin (not a TTY)");
@@ -21,7 +31,7 @@ pub async fn run(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw)?;
 
-    process_payload(pool, &raw).await
+    process_payload(pool, &raw, retention).await
 }
 
 /// Process a raw JSON payload string: parse, extract fields, insert into DB.
@@ -31,6 +41,7 @@ pub async fn run(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
 pub async fn process_payload(
     pool: &SqlitePool,
     raw: &str,
+    retention: Option<&RetentionConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if raw.trim().is_empty() {
         eprintln!("scribe log: empty stdin, nothing to log");
@@ -82,6 +93,60 @@ pub async fn process_payload(
     )
     .await?;
 
+    // Auto-retention: if configured, maybe clean up expired events
+    if let Some(ret) = retention {
+        if let Err(e) = maybe_run_retention(pool, &ret.retention, &ret.check_interval).await {
+            eprintln!("scribe: auto-retention error: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if auto-retention should run, and if so, execute it.
+/// Returns immediately (< 1ms) if the check interval has not elapsed.
+pub async fn maybe_run_retention(
+    pool: &SqlitePool,
+    retention_str: &str,
+    check_interval_str: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let check_interval = humantime::parse_duration(check_interval_str)
+        .map_err(|e| format!("invalid retention_check_interval '{check_interval_str}': {e}"))?;
+    let check_interval_chrono = chrono::Duration::from_std(check_interval)?;
+
+    // Check if we need to run retention
+    let now = Utc::now();
+    if let Some(last_check_str) = db::get_metadata(pool, "last_retention_check").await? {
+        if let Ok(last_check) = chrono::DateTime::parse_from_rfc3339(&last_check_str) {
+            if now - last_check.with_timezone(&Utc) < check_interval_chrono {
+                return Ok(()); // Not time yet
+            }
+        }
+        // If parsing fails, treat as "never checked" and proceed
+    }
+
+    // Parse retention duration and compute cutoff
+    let retention_duration = humantime::parse_duration(retention_str)
+        .map_err(|e| format!("invalid retention '{retention_str}': {e}"))?;
+    let cutoff = now - chrono::Duration::from_std(retention_duration)?;
+    let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+    // Delete expired events and orphaned sessions
+    db::delete_events_before(pool, &cutoff_str).await?;
+    db::delete_orphaned_sessions(pool).await?;
+
+    // Reclaim disk space
+    sqlx::query("PRAGMA incremental_vacuum")
+        .execute(pool)
+        .await?;
+    sqlx::query("PRAGMA journal_size_limit = 0")
+        .execute(pool)
+        .await?;
+
+    // Update last check timestamp
+    let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    db::set_metadata(pool, "last_retention_check", &now_str).await?;
+
     Ok(())
 }
 
@@ -104,7 +169,7 @@ mod tests {
 
         let raw = r#"{"session_id":"sess-42","hook_event_name":"PreToolUse","cwd":"/project","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_response":null}"#;
 
-        process_payload(&pool, raw).await.unwrap();
+        process_payload(&pool, raw, None).await.unwrap();
 
         let row = sqlx::query("SELECT session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload FROM events ORDER BY id DESC LIMIT 1")
             .fetch_one(&pool)
@@ -137,7 +202,7 @@ mod tests {
 
     /// Helper: insert a payload and return the last inserted event row
     async fn insert_and_get(pool: &SqlitePool, json: &str) -> sqlx::sqlite::SqliteRow {
-        process_payload(pool, json).await.unwrap();
+        process_payload(pool, json, None).await.unwrap();
         sqlx::query("SELECT * FROM events ORDER BY id DESC LIMIT 1")
             .fetch_one(pool)
             .await
@@ -324,10 +389,11 @@ mod tests {
         process_payload(
             &pool,
             r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":"/project-a"}"#,
+            None,
         )
         .await
         .unwrap();
-        process_payload(&pool, r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/project-b","tool_name":"Bash"}"#).await.unwrap();
+        process_payload(&pool, r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/project-b","tool_name":"Bash"}"#, None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT event_count, cwd, first_seen, last_seen FROM sessions WHERE session_id = 's1'",
@@ -348,12 +414,14 @@ mod tests {
         process_payload(
             &pool,
             r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":"/a"}"#,
+            None,
         )
         .await
         .unwrap();
         process_payload(
             &pool,
             r#"{"session_id":"s2","hook_event_name":"SessionStart","cwd":"/b"}"#,
+            None,
         )
         .await
         .unwrap();
@@ -370,21 +438,21 @@ mod tests {
     #[tokio::test]
     async fn test_malformed_json_returns_ok() {
         let (pool, _dir) = setup_db().await;
-        let result = process_payload(&pool, "not json {{{").await;
+        let result = process_payload(&pool, "not json {{{", None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_empty_stdin_returns_ok() {
         let (pool, _dir) = setup_db().await;
-        let result = process_payload(&pool, "").await;
+        let result = process_payload(&pool, "", None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_whitespace_only_returns_ok() {
         let (pool, _dir) = setup_db().await;
-        let result = process_payload(&pool, "   \n  ").await;
+        let result = process_payload(&pool, "   \n  ", None).await;
         assert!(result.is_ok());
     }
 
@@ -396,7 +464,7 @@ mod tests {
 
         // Payload with specific formatting, field order, and extra fields
         let raw = "{ \"session_id\" : \"s1\" , \"hook_event_name\" : \"Stop\" , \"cwd\" : \"/tmp\" , \"unknown_field\" : 42 , \"nested\" : { \"a\" : 1 } }";
-        process_payload(&pool, raw).await.unwrap();
+        process_payload(&pool, raw, None).await.unwrap();
 
         let stored: String =
             sqlx::query_scalar("SELECT raw_payload FROM events ORDER BY id DESC LIMIT 1")
@@ -416,6 +484,7 @@ mod tests {
         process_payload(
             &pool,
             r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":"/tmp"}"#,
+            None,
         )
         .await
         .unwrap();
@@ -423,7 +492,7 @@ mod tests {
         // Measure warm insert
         let payload = r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"echo hi"}}"#;
         let start = std::time::Instant::now();
-        process_payload(&pool, payload).await.unwrap();
+        process_payload(&pool, payload, None).await.unwrap();
         let elapsed = start.elapsed();
 
         // Soft assertion: print timing, only fail if way over budget
@@ -433,5 +502,120 @@ mod tests {
             "Warm insert took {:?} — expected < 10ms (100ms hard limit for CI)",
             elapsed
         );
+    }
+
+    // ── Auto-retention tests ──
+
+    async fn insert_event_at(pool: &SqlitePool, session: &str, ts: &str) {
+        sqlx::query(
+            "INSERT INTO events (timestamp, session_id, event_type, cwd, raw_payload) VALUES (?, ?, 'PreToolUse', '/tmp', '{}')",
+        )
+        .bind(ts)
+        .bind(session)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, '/tmp', 1) ON CONFLICT(session_id) DO UPDATE SET last_seen = excluded.last_seen, event_count = event_count + 1",
+        )
+        .bind(session)
+        .bind(ts)
+        .bind(ts)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_retention_check_not_elapsed() {
+        let (pool, _dir) = setup_db().await;
+
+        // Set last check to 1 hour ago
+        let one_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        db::set_metadata(&pool, "last_retention_check", &one_hour_ago)
+            .await
+            .unwrap();
+
+        // Insert an old event
+        insert_event_at(&pool, "s1", "2020-01-01T00:00:00.000Z").await;
+
+        // With 24h check interval, should NOT run (only 1h since last check)
+        maybe_run_retention(&pool, "1d", "24h").await.unwrap();
+
+        // Old event should still be there
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_retention_check_elapsed() {
+        let (pool, _dir) = setup_db().await;
+
+        // Set last check to 25 hours ago
+        let old_check = (chrono::Utc::now() - chrono::Duration::hours(25))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        db::set_metadata(&pool, "last_retention_check", &old_check)
+            .await
+            .unwrap();
+
+        // Insert old and new events
+        insert_event_at(&pool, "s1", "2020-01-01T00:00:00.000Z").await;
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        insert_event_at(&pool, "s2", &now).await;
+
+        // With 24h check interval, should run (25h since last check)
+        maybe_run_retention(&pool, "1d", "24h").await.unwrap();
+
+        // Only new event should remain
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_retention_missing_key_triggers_cleanup() {
+        let (pool, _dir) = setup_db().await;
+
+        // No last_retention_check set — should run cleanup
+        insert_event_at(&pool, "s1", "2020-01-01T00:00:00.000Z").await;
+
+        maybe_run_retention(&pool, "1d", "24h").await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // Metadata should now be set
+        let check = db::get_metadata(&pool, "last_retention_check")
+            .await
+            .unwrap();
+        assert!(check.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_retention_invalid_retention_string() {
+        let (pool, _dir) = setup_db().await;
+        let result = maybe_run_retention(&pool, "not-valid", "24h").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_retention_invalid_check_interval() {
+        let (pool, _dir) = setup_db().await;
+        let result = maybe_run_retention(&pool, "90d", "not-valid").await;
+        assert!(result.is_err());
     }
 }

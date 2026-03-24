@@ -282,6 +282,34 @@ pub async fn delete_orphaned_sessions(
     Ok(result.rows_affected())
 }
 
+/// Get a metadata value by key.
+pub async fn get_metadata(
+    pool: &SqlitePool,
+    key: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let row: Option<String> = sqlx::query_scalar("SELECT value FROM _metadata WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row)
+}
+
+/// Set a metadata value (upsert).
+pub async fn set_metadata(
+    pool: &SqlitePool,
+    key: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO _metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Database metrics.
 pub struct DbStats {
     pub event_count: i64,

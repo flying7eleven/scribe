@@ -155,7 +155,14 @@ async fn main() {
 
     match cli.command {
         Commands::Log => {
-            if let Err(e) = cmd_log::run(&pool).await {
+            let retention = config.retention.as_ref().map(|r| cmd_log::RetentionConfig {
+                retention: r.clone(),
+                check_interval: config
+                    .retention_check_interval
+                    .clone()
+                    .unwrap_or_else(|| "24h".to_string()),
+            });
+            if let Err(e) = cmd_log::run(&pool, retention.as_ref()).await {
                 eprintln!("scribe: log error: {e}");
             }
         }
