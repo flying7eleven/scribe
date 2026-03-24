@@ -4,7 +4,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
 /// A row from the `events` table.
-#[allow(dead_code)] // Fields read by cmd_query — wired in by E04
+#[allow(dead_code)] // Fields read by cmd_query — wired in by E04-S02
 #[derive(Debug, FromRow)]
 pub struct EventRow {
     pub id: i64,
@@ -17,6 +17,56 @@ pub struct EventRow {
     pub cwd: Option<String>,
     pub permission_mode: Option<String>,
     pub raw_payload: String,
+}
+
+/// Filter parameters for querying events.
+#[derive(Default)]
+pub struct EventFilter {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub session_id: Option<String>,
+    pub event_type: Option<String>,
+    pub tool_name: Option<String>,
+    pub search: Option<String>,
+    pub limit: i64,
+}
+
+impl EventFilter {
+    #[allow(dead_code)] // Used by tests + wired in by E04-S02
+    pub fn new() -> Self {
+        Self {
+            limit: 50,
+            ..Default::default()
+        }
+    }
+}
+
+/// A row from the `sessions` table.
+#[allow(dead_code)] // Fields read by cmd_query — wired in by E04-S02
+#[derive(Debug, FromRow)]
+pub struct SessionRow {
+    pub session_id: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub cwd: Option<String>,
+    pub event_count: i64,
+}
+
+/// Filter parameters for querying sessions.
+#[derive(Default)]
+pub struct SessionFilter {
+    pub since: Option<String>,
+    pub limit: i64,
+}
+
+impl SessionFilter {
+    #[allow(dead_code)] // Used by tests + wired in by E04-S02
+    pub fn new() -> Self {
+        Self {
+            limit: 50,
+            ..Default::default()
+        }
+    }
 }
 
 /// Resolve the database path with precedence:
@@ -124,20 +174,79 @@ pub async fn insert_event(
     Ok(())
 }
 
-/// Query events ordered by timestamp descending with a limit.
-/// No filtering — full filtering is added in E04.
-#[allow(dead_code)] // Wired in by E04 (cmd_query)
+/// Query events with dynamic filters, ordered by timestamp descending.
+#[allow(dead_code)] // Wired in by E04-S02 (cmd_query)
 pub async fn query_events(
     pool: &SqlitePool,
-    limit: i64,
+    filter: &EventFilter,
 ) -> Result<Vec<EventRow>, Box<dyn std::error::Error>> {
-    let rows = sqlx::query_as::<_, EventRow>(
-        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload
-         FROM events ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let mut sql = String::from(
+        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload FROM events WHERE 1=1",
+    );
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(ref since) = filter.since {
+        sql.push_str(" AND timestamp >= ?");
+        binds.push(since.clone());
+    }
+    if let Some(ref until) = filter.until {
+        sql.push_str(" AND timestamp <= ?");
+        binds.push(until.clone());
+    }
+    if let Some(ref session_id) = filter.session_id {
+        sql.push_str(" AND session_id = ?");
+        binds.push(session_id.clone());
+    }
+    if let Some(ref event_type) = filter.event_type {
+        sql.push_str(" AND event_type = ?");
+        binds.push(event_type.clone());
+    }
+    if let Some(ref tool_name) = filter.tool_name {
+        sql.push_str(" AND tool_name = ?");
+        binds.push(tool_name.clone());
+    }
+    if let Some(ref search) = filter.search {
+        sql.push_str(" AND tool_input LIKE '%' || ? || '%'");
+        binds.push(search.clone());
+    }
+
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    binds.push(filter.limit.to_string());
+
+    let mut query = sqlx::query_as::<_, EventRow>(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// Query sessions with optional filters, ordered by last_seen descending.
+#[allow(dead_code)] // Wired in by E04-S02 (cmd_query)
+pub async fn query_sessions(
+    pool: &SqlitePool,
+    filter: &SessionFilter,
+) -> Result<Vec<SessionRow>, Box<dyn std::error::Error>> {
+    let mut sql = String::from(
+        "SELECT session_id, first_seen, last_seen, cwd, event_count FROM sessions WHERE 1=1",
+    );
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(ref since) = filter.since {
+        sql.push_str(" AND last_seen >= ?");
+        binds.push(since.clone());
+    }
+
+    sql.push_str(" ORDER BY last_seen DESC LIMIT ?");
+    binds.push(filter.limit.to_string());
+
+    let mut query = sqlx::query_as::<_, SessionRow>(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -297,7 +406,7 @@ mod tests {
         .await
         .unwrap();
 
-        let events = query_events(&pool, 50).await.unwrap();
+        let events = query_events(&pool, &EventFilter::new()).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "sess-1");
         assert_eq!(events[0].event_type, "PreToolUse");
@@ -430,7 +539,15 @@ mod tests {
             .unwrap();
         }
 
-        let events = query_events(&pool, 3).await.unwrap();
+        let events = query_events(
+            &pool,
+            &EventFilter {
+                limit: 3,
+                ..EventFilter::new()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(events.len(), 3);
 
         pool.close().await;
@@ -475,5 +592,192 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         let expected = home.join(".claude").join("scribe.db");
         assert_eq!(result, expected.to_string_lossy());
+    }
+
+    // ── Query filter tests ──
+
+    async fn setup_filtered_db() -> (SqlitePool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("filter.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        // Insert events with controlled timestamps via direct SQL
+        for (i, (session, event_type, tool, cwd, ts)) in [
+            (
+                "s1",
+                "PreToolUse",
+                Some("Bash"),
+                "/a",
+                "2025-01-01T10:00:00.000Z",
+            ),
+            (
+                "s1",
+                "PostToolUse",
+                Some("Bash"),
+                "/a",
+                "2025-01-01T11:00:00.000Z",
+            ),
+            (
+                "s2",
+                "PreToolUse",
+                Some("Write"),
+                "/b",
+                "2025-01-01T12:00:00.000Z",
+            ),
+            ("s2", "SessionEnd", None, "/b", "2025-01-01T13:00:00.000Z"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let tool_input = if *event_type == "PreToolUse" && *tool == Some("Bash") {
+                Some(r#"{"command":"echo hello"}"#)
+            } else {
+                None
+            };
+            sqlx::query(
+                "INSERT INTO events (id, timestamp, session_id, event_type, tool_name, tool_input, cwd, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(i as i64 + 1)
+            .bind(ts)
+            .bind(session)
+            .bind(event_type)
+            .bind(tool)
+            .bind(tool_input)
+            .bind(cwd)
+            .bind("{}")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Upsert session
+            sqlx::query(
+                "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, ?, 1) ON CONFLICT(session_id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, event_count = event_count + 1",
+            )
+            .bind(session)
+            .bind(ts)
+            .bind(ts)
+            .bind(cwd)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn test_query_events_no_filters() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let events = query_events(&pool, &EventFilter::new()).await.unwrap();
+        assert_eq!(events.len(), 4);
+        // Ordered by timestamp DESC
+        assert_eq!(events[0].timestamp, "2025-01-01T13:00:00.000Z");
+    }
+
+    #[tokio::test]
+    async fn test_query_events_since_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            since: Some("2025-01-01T11:30:00.000Z".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 2); // 12:00 and 13:00
+    }
+
+    #[tokio::test]
+    async fn test_query_events_session_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            session_id: Some("s1".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_events_event_type_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            event_type: Some("PreToolUse".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_events_tool_name_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            tool_name: Some("Write".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name.as_deref(), Some("Write"));
+    }
+
+    #[tokio::test]
+    async fn test_query_events_search_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            search: Some("echo hello".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0]
+            .tool_input
+            .as_ref()
+            .unwrap()
+            .contains("echo hello"));
+    }
+
+    #[tokio::test]
+    async fn test_query_events_combined_filters() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            session_id: Some("s1".to_string()),
+            event_type: Some("PreToolUse".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "s1");
+        assert_eq!(events[0].event_type, "PreToolUse");
+    }
+
+    #[tokio::test]
+    async fn test_query_events_empty_result() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = EventFilter {
+            tool_name: Some("NonExistent".to_string()),
+            ..EventFilter::new()
+        };
+        let events = query_events(&pool, &filter).await.unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_sessions_no_filters() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let sessions = query_sessions(&pool, &SessionFilter::new()).await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        // Ordered by last_seen DESC
+        assert_eq!(sessions[0].session_id, "s2");
+    }
+
+    #[tokio::test]
+    async fn test_query_sessions_since_filter() {
+        let (pool, _dir) = setup_filtered_db().await;
+        let filter = SessionFilter {
+            since: Some("2025-01-01T12:30:00.000Z".to_string()),
+            ..SessionFilter::new()
+        };
+        let sessions = query_sessions(&pool, &filter).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "s2");
     }
 }
