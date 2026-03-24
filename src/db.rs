@@ -125,6 +125,86 @@ mod tests {
         pool.close().await;
     }
 
+    #[tokio::test]
+    async fn test_migration_creates_tables_and_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("migration_test.db");
+        let db_str = db_path.to_str().unwrap();
+
+        let pool = connect(db_str).await.unwrap();
+
+        // Verify events table exists with expected columns
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('events') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                "id",
+                "timestamp",
+                "session_id",
+                "event_type",
+                "tool_name",
+                "tool_input",
+                "tool_response",
+                "cwd",
+                "permission_mode",
+                "raw_payload"
+            ]
+        );
+
+        // Verify sessions table exists with expected columns
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                "session_id",
+                "first_seen",
+                "last_seen",
+                "cwd",
+                "event_count"
+            ]
+        );
+
+        // Verify all four indexes on events
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name LIKE 'idx_%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            indexes,
+            vec![
+                "idx_events_session",
+                "idx_events_tool",
+                "idx_events_ts",
+                "idx_events_type"
+            ]
+        );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idempotent_test.db");
+        let db_str = db_path.to_str().unwrap();
+
+        // Connect twice — second call should not error
+        let pool = connect(db_str).await.unwrap();
+        pool.close().await;
+        let pool = connect(db_str).await.unwrap();
+        pool.close().await;
+    }
+
     #[test]
     fn test_resolve_db_path_cli_overrides_all() {
         let _lock = ENV_LOCK.lock().unwrap();
