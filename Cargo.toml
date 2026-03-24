@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 sqlx-sqlite = { version = "0.8", features = ["bundled"] }
+toml = "0.8"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [dev-dependencies]

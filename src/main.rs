@@ -4,6 +4,7 @@ mod cmd_log;
 mod cmd_query;
 mod cmd_retain;
 mod cmd_stats;
+mod config;
 mod db;
 mod models;
 
@@ -53,9 +54,9 @@ enum Commands {
         /// Search in tool_input JSON
         #[arg(long)]
         search: Option<String>,
-        /// Maximum number of results (default: 50)
-        #[arg(long, default_value_t = 50)]
-        limit: i64,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<i64>,
         /// Output as JSON Lines
         #[arg(long, conflicts_with = "csv")]
         json: bool,
@@ -93,9 +94,9 @@ enum QuerySub {
         /// Show sessions since (duration or date)
         #[arg(long)]
         since: Option<String>,
-        /// Maximum number of results (default: 50)
-        #[arg(long, default_value_t = 50)]
-        limit: i64,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<i64>,
         /// Output as JSON Lines
         #[arg(long, conflicts_with = "csv")]
         json: bool,
@@ -108,6 +109,8 @@ enum QuerySub {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
+
+    let config = config::load_config();
 
     // Commands that don't need a database connection
     match cli.command {
@@ -134,7 +137,7 @@ async fn main() {
 
     // Commands that need a database connection
     let cli_db = cli.db.as_ref().and_then(|p| p.to_str());
-    let db_path = match db::resolve_db_path(cli_db) {
+    let db_path = match db::resolve_db_path(cli_db, config.db_path.as_deref()) {
         Ok(path) => path,
         Err(e) => {
             eprintln!("scribe: failed to resolve database path: {e}");
@@ -184,7 +187,7 @@ async fn main() {
                 };
                 let filter = db::SessionFilter {
                     since: s_since,
-                    limit: s_limit,
+                    limit: s_limit.or(config.default_query_limit).unwrap_or(50),
                 };
                 let format = if s_json {
                     cmd_query::OutputFormat::Json
@@ -220,7 +223,7 @@ async fn main() {
                     event_type: event,
                     tool_name: tool,
                     search,
-                    limit,
+                    limit: limit.or(config.default_query_limit).unwrap_or(50),
                 };
                 let format = if json {
                     cmd_query::OutputFormat::Json

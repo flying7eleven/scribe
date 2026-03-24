@@ -67,11 +67,15 @@ impl SessionFilter {
     }
 }
 
-/// Resolve the database path with precedence:
-/// 1. `--db <path>` CLI argument (passed as `cli_db`)
+/// Resolve the database path with 4-layer precedence:
+/// 1. `--db <path>` CLI argument (highest)
 /// 2. `SCRIBE_DB` environment variable
-/// 3. Default: `~/.claude/scribe.db`
-pub fn resolve_db_path(cli_db: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+/// 3. Config file `db_path`
+/// 4. Default: `~/.claude/scribe.db`
+pub fn resolve_db_path(
+    cli_db: Option<&str>,
+    config_db: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
     if let Some(path) = cli_db {
         return Ok(path.to_string());
     }
@@ -80,6 +84,10 @@ pub fn resolve_db_path(cli_db: Option<&str>) -> Result<String, Box<dyn std::erro
         if !path.is_empty() {
             return Ok(path);
         }
+    }
+
+    if let Some(path) = config_db {
+        return Ok(path.to_string());
     }
 
     let home = dirs::home_dir().ok_or("could not determine home directory")?;
@@ -625,25 +633,33 @@ mod tests {
     fn test_resolve_db_path_cli_overrides_all() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SCRIBE_DB", "/env/path.db") };
-        let result = resolve_db_path(Some("/cli/path.db")).unwrap();
+        let result = resolve_db_path(Some("/cli/path.db"), Some("/config/path.db")).unwrap();
         assert_eq!(result, "/cli/path.db");
         unsafe { std::env::remove_var("SCRIBE_DB") };
     }
 
     #[test]
-    fn test_resolve_db_path_env_overrides_default() {
+    fn test_resolve_db_path_env_overrides_config() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SCRIBE_DB", "/env/path.db") };
-        let result = resolve_db_path(None).unwrap();
+        let result = resolve_db_path(None, Some("/config/path.db")).unwrap();
         assert_eq!(result, "/env/path.db");
         unsafe { std::env::remove_var("SCRIBE_DB") };
+    }
+
+    #[test]
+    fn test_resolve_db_path_config_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SCRIBE_DB") };
+        let result = resolve_db_path(None, Some("/config/path.db")).unwrap();
+        assert_eq!(result, "/config/path.db");
     }
 
     #[test]
     fn test_resolve_db_path_default() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("SCRIBE_DB") };
-        let result = resolve_db_path(None).unwrap();
+        let result = resolve_db_path(None, None).unwrap();
         let home = dirs::home_dir().unwrap();
         let expected = home.join(".claude").join("scribe.db");
         assert_eq!(result, expected.to_string_lossy());
