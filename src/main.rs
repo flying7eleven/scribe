@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
     version,
     about = "Audit logger for Claude Code hook events"
 )]
-struct Cli {
+pub struct Cli {
     /// Path to the SQLite database (overrides SCRIBE_DB env var and default)
     #[arg(long, global = true)]
     db: Option<PathBuf>,
@@ -82,8 +82,8 @@ enum Commands {
     Stats,
     /// Print shell completion script to stdout
     Completions {
-        /// Shell to generate completions for (bash, zsh, fish)
-        shell: String,
+        /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
+        shell: clap_complete::Shell,
     },
 }
 
@@ -128,8 +128,8 @@ async fn main() {
             }
             return;
         }
-        Commands::Completions { .. } => {
-            eprintln!("scribe completions: not yet implemented");
+        Commands::Completions { shell } => {
+            cmd_completions::run(shell);
             return;
         }
         _ => {}
