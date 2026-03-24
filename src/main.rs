@@ -31,7 +31,38 @@ enum Commands {
     /// Read hook JSON from stdin and write to SQLite
     Log,
     /// Query the audit log with filters
-    Query,
+    Query {
+        #[command(subcommand)]
+        sub: Option<QuerySub>,
+
+        /// Show events since (duration like "1h" or date like "2025-06-01")
+        #[arg(long)]
+        since: Option<String>,
+        /// Show events until (duration or date)
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter by session ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Filter by event type (e.g., PreToolUse, PostToolUse)
+        #[arg(long)]
+        event: Option<String>,
+        /// Filter by tool name (e.g., Bash, Write, Edit)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Search in tool_input JSON
+        #[arg(long)]
+        search: Option<String>,
+        /// Maximum number of results (default: 50)
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Output as JSON Lines
+        #[arg(long, conflicts_with = "csv")]
+        json: bool,
+        /// Output as CSV
+        #[arg(long, conflicts_with = "json")]
+        csv: bool,
+    },
     /// Generate Claude Code hook configuration
     Init {
         /// Write to .claude/settings.json (project-level)
@@ -52,6 +83,25 @@ enum Commands {
     Completions {
         /// Shell to generate completions for (bash, zsh, fish)
         shell: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuerySub {
+    /// Show session summaries
+    Sessions {
+        /// Show sessions since (duration or date)
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum number of results (default: 50)
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Output as JSON Lines
+        #[arg(long, conflicts_with = "csv")]
+        json: bool,
+        /// Output as CSV
+        #[arg(long, conflicts_with = "json")]
+        csv: bool,
     },
 }
 
@@ -92,21 +142,98 @@ async fn main() {
         }
     };
 
+    let pool = match db::connect(&db_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("scribe: db connect error: {e}");
+            return;
+        }
+    };
+
     match cli.command {
         Commands::Log => {
-            let pool = match db::connect(&db_path).await {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("scribe: db connect error: {e}");
-                    return;
-                }
-            };
             if let Err(e) = cmd_log::run(&pool).await {
                 eprintln!("scribe: log error: {e}");
             }
         }
-        Commands::Query => {
-            eprintln!("scribe query: not yet implemented (db: {db_path})");
+        Commands::Query {
+            sub,
+            since,
+            until,
+            session,
+            event,
+            tool,
+            search,
+            limit,
+            json,
+            csv,
+        } => {
+            if let Some(QuerySub::Sessions {
+                since: s_since,
+                limit: s_limit,
+                json: s_json,
+                csv: s_csv,
+            }) = sub
+            {
+                let s_since = match s_since.map(|s| cmd_query::parse_time_spec(&s)).transpose() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("scribe: invalid --since value: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let filter = db::SessionFilter {
+                    since: s_since,
+                    limit: s_limit,
+                };
+                let format = if s_json {
+                    cmd_query::OutputFormat::Json
+                } else if s_csv {
+                    cmd_query::OutputFormat::Csv
+                } else {
+                    cmd_query::OutputFormat::Table
+                };
+                if let Err(e) = cmd_query::run_sessions(&pool, filter, format).await {
+                    eprintln!("scribe: query error: {e}");
+                    std::process::exit(1);
+                }
+            } else {
+                // Default: event query
+                let since = match since.map(|s| cmd_query::parse_time_spec(&s)).transpose() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("scribe: invalid --since value: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let until = match until.map(|s| cmd_query::parse_time_spec(&s)).transpose() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("scribe: invalid --until value: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let filter = db::EventFilter {
+                    since,
+                    until,
+                    session_id: session,
+                    event_type: event,
+                    tool_name: tool,
+                    search,
+                    limit,
+                };
+                let format = if json {
+                    cmd_query::OutputFormat::Json
+                } else if csv {
+                    cmd_query::OutputFormat::Csv
+                } else {
+                    cmd_query::OutputFormat::Table
+                };
+                if let Err(e) = cmd_query::run_events(&pool, filter, format).await {
+                    eprintln!("scribe: query error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Retain { .. } => {
             eprintln!("scribe retain: not yet implemented (db: {db_path})");
@@ -114,7 +241,6 @@ async fn main() {
         Commands::Stats => {
             eprintln!("scribe stats: not yet implemented (db: {db_path})");
         }
-        // Init and Completions handled above
         Commands::Init { .. } | Commands::Completions { .. } => unreachable!(),
     }
 }

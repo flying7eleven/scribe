@@ -4,7 +4,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
 /// A row from the `events` table.
-#[allow(dead_code)] // Fields read by cmd_query — wired in by E04-S02
 #[derive(Debug, FromRow)]
 pub struct EventRow {
     pub id: i64,
@@ -32,7 +31,7 @@ pub struct EventFilter {
 }
 
 impl EventFilter {
-    #[allow(dead_code)] // Used by tests + wired in by E04-S02
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             limit: 50,
@@ -42,7 +41,6 @@ impl EventFilter {
 }
 
 /// A row from the `sessions` table.
-#[allow(dead_code)] // Fields read by cmd_query — wired in by E04-S02
 #[derive(Debug, FromRow)]
 pub struct SessionRow {
     pub session_id: String,
@@ -60,7 +58,7 @@ pub struct SessionFilter {
 }
 
 impl SessionFilter {
-    #[allow(dead_code)] // Used by tests + wired in by E04-S02
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             limit: 50,
@@ -175,7 +173,6 @@ pub async fn insert_event(
 }
 
 /// Query events with dynamic filters, ordered by timestamp descending.
-#[allow(dead_code)] // Wired in by E04-S02 (cmd_query)
 pub async fn query_events(
     pool: &SqlitePool,
     filter: &EventFilter,
@@ -223,7 +220,6 @@ pub async fn query_events(
 }
 
 /// Query sessions with optional filters, ordered by last_seen descending.
-#[allow(dead_code)] // Wired in by E04-S02 (cmd_query)
 pub async fn query_sessions(
     pool: &SqlitePool,
     filter: &SessionFilter,

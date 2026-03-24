@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Wired in by E04-S03 (main.rs dispatch)
-
 use std::io;
 
 use chrono::{DateTime, NaiveDate, Utc};
