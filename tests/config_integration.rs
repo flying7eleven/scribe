@@ -1,4 +1,5 @@
-//! End-to-end integration tests for config auto-creation (US-0025-E007).
+//! End-to-end integration tests for config auto-creation and migration
+//! (US-0025-E007, US-0026-E007).
 
 use std::process::Command;
 

@@ -122,9 +122,12 @@ fn is_interactive_command(cmd: &Commands) -> bool {
 async fn main() {
     let cli = Cli::parse();
 
-    // Auto-create config on first interactive run (never on `log` hot path)
+    // Auto-create and migrate config on interactive runs (never on `log` hot path)
     if is_interactive_command(&cli.command) {
         let _ = config::ensure_config_exists();
+        if let Ok(Some(report)) = config::migrate_config() {
+            eprintln!("{}", config::format_migration_report(&report));
+        }
     }
 
     let config = config::load_config();

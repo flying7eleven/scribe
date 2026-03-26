@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use toml_edit::DocumentMut;
 
 /// Canonical config template with commented-out defaults.
 /// All fields are commented so compiled defaults remain in effect.
@@ -76,6 +77,192 @@ pub fn ensure_config_exists_at(path: &std::path::Path) -> Result<bool, Box<dyn s
     }
 
     Ok(true)
+}
+
+/// Fields that have been removed from the config schema.
+/// Migration will delete these from the user's config file.
+const OBSOLETE_FIELDS: &[&str] = &[
+    // Currently empty. When a field is renamed or removed in a future version,
+    // add its old name here. Example:
+    // "old_field_name",
+];
+
+/// Result of a config migration operation.
+pub struct MigrationReport {
+    pub fields_added: Vec<String>,
+    pub fields_removed: Vec<String>,
+}
+
+impl MigrationReport {
+    pub fn has_changes(&self) -> bool {
+        !self.fields_added.is_empty() || !self.fields_removed.is_empty()
+    }
+}
+
+/// Migrate the config file at the platform-appropriate path.
+/// Returns `Ok(None)` if no migration was needed or file doesn't exist.
+pub fn migrate_config() -> Result<Option<MigrationReport>, Box<dyn std::error::Error>> {
+    let Some(path) = config_path() else {
+        return Ok(None);
+    };
+    migrate_config_at(&path)
+}
+
+/// Migrate a config file at an explicit path (for testing).
+/// Adds missing fields from CONFIG_TEMPLATE, removes obsolete fields.
+/// Preserves user values, comments, and unknown fields.
+pub fn migrate_config_at(
+    path: &Path,
+) -> Result<Option<MigrationReport>, Box<dyn std::error::Error>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            eprintln!(
+                "Warning: could not read config file for migration {}: {e}",
+                path.display()
+            );
+            return Ok(None);
+        }
+    };
+
+    let mut doc: DocumentMut = match content.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "Warning: could not parse config file for migration {}: {e}",
+                path.display()
+            );
+            return Ok(None);
+        }
+    };
+
+    let mut fields_added = Vec::new();
+    let mut fields_removed = Vec::new();
+
+    // Extract the known field names from the template by scanning for "# field_name ="
+    let template_fields: Vec<&str> = CONFIG_TEMPLATE
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("# ") && trimmed.contains(" = ") {
+                // Extract field name from "# field_name = ..."
+                trimmed
+                    .strip_prefix("# ")
+                    .and_then(|rest| rest.split(" = ").next())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Check for missing fields — collect blocks to append
+    let mut append_blocks = String::new();
+    for field in &template_fields {
+        let active = doc.as_table().contains_key(field);
+        let commented = field_present_in_text(&content, field);
+
+        if !active && !commented {
+            let block = extract_template_block(field);
+            append_blocks.push('\n');
+            append_blocks.push_str(&block);
+            fields_added.push((*field).to_string());
+        }
+    }
+
+    // Remove obsolete fields
+    for field in OBSOLETE_FIELDS {
+        if doc.as_table().contains_key(field) {
+            doc.remove(field);
+            fields_removed.push((*field).to_string());
+        }
+    }
+
+    let report = MigrationReport {
+        fields_added,
+        fields_removed,
+    };
+
+    if !report.has_changes() {
+        return Ok(None);
+    }
+
+    // Build final content: serialized document + appended comment blocks
+    let mut output = doc.to_string();
+    if !append_blocks.is_empty() {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&append_blocks);
+    }
+
+    if let Err(e) = std::fs::write(path, output) {
+        eprintln!(
+            "Warning: could not write migrated config file {}: {e}",
+            path.display()
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(report))
+}
+
+/// Check if a field name appears as a commented-out line in the raw text.
+/// Matches lines like `# field_name = ...` with optional leading whitespace.
+fn field_present_in_text(text: &str, field: &str) -> bool {
+    let pattern = format!("# {field} =");
+    text.lines().any(|line| line.trim().starts_with(&pattern))
+}
+
+/// Extract the comment block + commented-out value for a field from CONFIG_TEMPLATE.
+/// Returns the block as a string ending with a newline.
+fn extract_template_block(field: &str) -> String {
+    let target_line = format!("# {field} =");
+    let lines: Vec<&str> = CONFIG_TEMPLATE.lines().collect();
+
+    // Find the line with "# field_name = ..."
+    let Some(field_idx) = lines
+        .iter()
+        .position(|l| l.trim().starts_with(&target_line))
+    else {
+        return format!("{target_line}\n");
+    };
+
+    // Walk backwards to find the start of the comment block
+    let mut start = field_idx;
+    while start > 0 && lines[start - 1].starts_with('#') {
+        start -= 1;
+    }
+
+    // Include a leading blank line for separation if we're not at the start
+    let mut block = String::new();
+    for line in &lines[start..=field_idx] {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block
+}
+
+/// Format a migration report as a stderr message.
+pub fn format_migration_report(report: &MigrationReport) -> String {
+    let mut parts = Vec::new();
+    if !report.fields_added.is_empty() {
+        let names: Vec<String> = report
+            .fields_added
+            .iter()
+            .map(|f| format!("'{f}'"))
+            .collect();
+        parts.push(format!("added {}", names.join(", ")));
+    }
+    if !report.fields_removed.is_empty() {
+        let names: Vec<String> = report
+            .fields_removed
+            .iter()
+            .map(|f| format!("'{f}'"))
+            .collect();
+        parts.push(format!("removed {}", names.join(", ")));
+    }
+    format!("scribe: config updated — {}", parts.join(", "))
 }
 
 /// Load config from the platform-appropriate config directory.
@@ -257,5 +444,198 @@ default_query_limit = 200
         let path = dir.path().join("nonexistent.toml");
         let config = load_config_from(&path);
         assert!(config.db_path.is_none());
+    }
+
+    // --- Migration tests (US-0026-E007) ---
+
+    #[test]
+    fn test_migrate_adds_missing_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Config with only db_path set — other fields missing
+        std::fs::write(&path, "db_path = \"/custom.db\"\n").unwrap();
+
+        let report = migrate_config_at(&path).unwrap().unwrap();
+        assert!(report.has_changes());
+        assert!(report.fields_added.contains(&"retention".to_string()));
+        assert!(report
+            .fields_added
+            .contains(&"retention_check_interval".to_string()));
+        assert!(report
+            .fields_added
+            .contains(&"default_query_limit".to_string()));
+        // db_path was already present, should not be added
+        assert!(!report.fields_added.contains(&"db_path".to_string()));
+
+        // Verify the file now contains the missing fields as comments
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# retention ="));
+        assert!(content.contains("# retention_check_interval ="));
+        assert!(content.contains("# default_query_limit ="));
+        // User value preserved
+        assert!(content.contains("db_path = \"/custom.db\""));
+    }
+
+    #[test]
+    fn test_migrate_preserves_user_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "db_path = \"/my/path.db\"\ndefault_query_limit = 200\n",
+        )
+        .unwrap();
+
+        let report = migrate_config_at(&path).unwrap().unwrap();
+        // Only retention and retention_check_interval should be added
+        assert_eq!(report.fields_added.len(), 2);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("db_path = \"/my/path.db\""));
+        assert!(content.contains("default_query_limit = 200"));
+    }
+
+    #[test]
+    fn test_migrate_preserves_user_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# My custom comment about this config\ndb_path = \"/custom.db\"\n",
+        )
+        .unwrap();
+
+        migrate_config_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# My custom comment about this config"));
+        assert!(content.contains("db_path = \"/custom.db\""));
+    }
+
+    #[test]
+    fn test_migrate_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let report = migrate_config_at(&path).unwrap().unwrap();
+        assert_eq!(report.fields_added.len(), 4);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# db_path ="));
+        assert!(content.contains("# retention ="));
+        assert!(content.contains("# retention_check_interval ="));
+        assert!(content.contains("# default_query_limit ="));
+    }
+
+    #[test]
+    fn test_migrate_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let bad_content = "not valid {{{{ toml ]]]]";
+        std::fs::write(&path, bad_content).unwrap();
+
+        let result = migrate_config_at(&path).unwrap();
+        assert!(result.is_none());
+
+        // File should not be modified
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, bad_content);
+    }
+
+    #[test]
+    fn test_migrate_noop_when_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Write the full template — all fields present as comments
+        std::fs::write(&path, CONFIG_TEMPLATE).unwrap();
+
+        let result = migrate_config_at(&path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_migrate_commented_out_field_not_readded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // db_path is active, retention is commented out — both should be considered present
+        std::fs::write(&path, "db_path = \"/custom.db\"\n# retention = \"90d\"\n").unwrap();
+
+        let report = migrate_config_at(&path).unwrap().unwrap();
+        // Only retention_check_interval and default_query_limit should be added
+        assert!(!report.fields_added.contains(&"db_path".to_string()));
+        assert!(!report.fields_added.contains(&"retention".to_string()));
+        assert!(report
+            .fields_added
+            .contains(&"retention_check_interval".to_string()));
+        assert!(report
+            .fields_added
+            .contains(&"default_query_limit".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_mix_active_and_commented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Mix of active and commented-out fields covering all 4
+        std::fs::write(
+            &path,
+            "db_path = \"/custom.db\"\n# retention = \"90d\"\n# retention_check_interval = \"12h\"\ndefault_query_limit = 100\n",
+        )
+        .unwrap();
+
+        let result = migrate_config_at(&path).unwrap();
+        // All fields present — no migration needed
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_migrate_unknown_fields_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Config with all known fields plus an unknown one
+        std::fs::write(
+            &path,
+            "db_path = \"/custom.db\"\nunknown_setting = true\n# retention = \"90d\"\n# retention_check_interval = \"24h\"\n# default_query_limit = 50\n",
+        )
+        .unwrap();
+
+        let result = migrate_config_at(&path).unwrap();
+        assert!(result.is_none());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("unknown_setting = true"));
+    }
+
+    #[test]
+    fn test_migrate_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+
+        let result = migrate_config_at(&path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_migration_report_format() {
+        let report = MigrationReport {
+            fields_added: vec!["retention".to_string(), "default_query_limit".to_string()],
+            fields_removed: vec![],
+        };
+        let msg = format_migration_report(&report);
+        assert_eq!(
+            msg,
+            "scribe: config updated — added 'retention', 'default_query_limit'"
+        );
+
+        let report2 = MigrationReport {
+            fields_added: vec!["new_field".to_string()],
+            fields_removed: vec!["old_field".to_string()],
+        };
+        let msg2 = format_migration_report(&report2);
+        assert_eq!(
+            msg2,
+            "scribe: config updated — added 'new_field', removed 'old_field'"
+        );
     }
 }
