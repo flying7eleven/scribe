@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 
 /// A row from the `events` table.
 #[derive(Debug, FromRow)]
@@ -318,20 +319,50 @@ pub struct DbStats {
     pub newest_event: Option<String>,
 }
 
-/// Get database metrics.
-pub async fn get_stats(pool: &SqlitePool) -> Result<DbStats, Box<dyn std::error::Error>> {
-    let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
-        .fetch_one(pool)
-        .await?;
-    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-        .fetch_one(pool)
-        .await?;
-    let oldest_event: Option<String> = sqlx::query_scalar("SELECT MIN(timestamp) FROM events")
-        .fetch_one(pool)
-        .await?;
-    let newest_event: Option<String> = sqlx::query_scalar("SELECT MAX(timestamp) FROM events")
-        .fetch_one(pool)
-        .await?;
+/// Get database metrics, optionally scoped to events since a given timestamp.
+pub async fn get_stats(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<DbStats, Box<dyn std::error::Error>> {
+    let (event_count, oldest_event, newest_event) = if let Some(since) = since {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE timestamp >= ?")
+            .bind(since)
+            .fetch_one(pool)
+            .await?;
+        let oldest: Option<String> =
+            sqlx::query_scalar("SELECT MIN(timestamp) FROM events WHERE timestamp >= ?")
+                .bind(since)
+                .fetch_one(pool)
+                .await?;
+        let newest: Option<String> =
+            sqlx::query_scalar("SELECT MAX(timestamp) FROM events WHERE timestamp >= ?")
+                .bind(since)
+                .fetch_one(pool)
+                .await?;
+        (count, oldest, newest)
+    } else {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(pool)
+            .await?;
+        let oldest: Option<String> = sqlx::query_scalar("SELECT MIN(timestamp) FROM events")
+            .fetch_one(pool)
+            .await?;
+        let newest: Option<String> = sqlx::query_scalar("SELECT MAX(timestamp) FROM events")
+            .fetch_one(pool)
+            .await?;
+        (count, oldest, newest)
+    };
+
+    let session_count: i64 = if let Some(since) = since {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE last_seen >= ?")
+            .bind(since)
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(pool)
+            .await?
+    };
 
     Ok(DbStats {
         event_count,
@@ -339,6 +370,299 @@ pub async fn get_stats(pool: &SqlitePool) -> Result<DbStats, Box<dyn std::error:
         oldest_event,
         newest_event,
     })
+}
+
+// ── Extended stats queries (E006) ──
+
+/// Tool usage count for the top-tools breakdown.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct ToolCount {
+    pub tool_name: String,
+    pub count: i64,
+}
+
+/// Get the most frequently used tools, ranked by call count.
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn top_tools(
+    pool: &SqlitePool,
+    since: Option<&str>,
+    limit: i64,
+) -> Result<Vec<ToolCount>, Box<dyn std::error::Error>> {
+    let mut sql =
+        String::from("SELECT tool_name, COUNT(*) as count FROM events WHERE tool_name IS NOT NULL");
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" AND timestamp >= ?");
+        binds.push(since.to_string());
+    }
+
+    sql.push_str(" GROUP BY tool_name ORDER BY count DESC LIMIT ?");
+    binds.push(limit.to_string());
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results = rows
+        .iter()
+        .map(|row| ToolCount {
+            tool_name: row.get("tool_name"),
+            count: row.get("count"),
+        })
+        .collect();
+    Ok(results)
+}
+
+/// Event type distribution count.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct EventTypeCount {
+    pub event_type: String,
+    pub count: i64,
+}
+
+/// Get event type breakdown (only types with > 0 occurrences).
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn event_type_breakdown(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<EventTypeCount>, Box<dyn std::error::Error>> {
+    let mut sql = String::from("SELECT event_type, COUNT(*) as count FROM events");
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" WHERE timestamp >= ?");
+        binds.push(since.to_string());
+    }
+
+    sql.push_str(" GROUP BY event_type ORDER BY count DESC");
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results = rows
+        .iter()
+        .map(|row| EventTypeCount {
+            event_type: row.get("event_type"),
+            count: row.get("count"),
+        })
+        .collect();
+    Ok(results)
+}
+
+/// A StopFailure error type and its count.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct StopFailureType {
+    pub error_type: String,
+    pub count: i64,
+}
+
+/// Error summary with failure counts and StopFailure type breakdown.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct ErrorSummary {
+    pub post_tool_use_failure_count: i64,
+    pub stop_failure_count: i64,
+    pub stop_failure_types: Vec<StopFailureType>,
+}
+
+/// Get error summary: PostToolUseFailure and StopFailure counts, with StopFailure type breakdown.
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn error_summary(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<ErrorSummary, Box<dyn std::error::Error>> {
+    // Count PostToolUseFailure events
+    let post_tool_use_failure_count: i64 = if let Some(since) = since {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'PostToolUseFailure' AND timestamp >= ?",
+        )
+        .bind(since)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = 'PostToolUseFailure'")
+            .fetch_one(pool)
+            .await?
+    };
+
+    // Count StopFailure events
+    let stop_failure_count: i64 = if let Some(since) = since {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'StopFailure' AND timestamp >= ?",
+        )
+        .bind(since)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = 'StopFailure'")
+            .fetch_one(pool)
+            .await?
+    };
+
+    // Application-side parsing of StopFailure error types from raw_payload
+    let stop_failure_types = if stop_failure_count > 0 {
+        let mut sql =
+            String::from("SELECT raw_payload FROM events WHERE event_type = 'StopFailure'");
+        let mut binds: Vec<String> = Vec::new();
+
+        if let Some(since) = since {
+            sql.push_str(" AND timestamp >= ?");
+            binds.push(since.to_string());
+        }
+
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for bind in &binds {
+            query = query.bind(bind);
+        }
+
+        let payloads = query.fetch_all(pool).await?;
+
+        let mut type_counts: HashMap<String, i64> = HashMap::new();
+        for payload in &payloads {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                let error_type = value
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                *type_counts.entry(error_type).or_insert(0) += 1;
+            }
+        }
+
+        let mut types: Vec<StopFailureType> = type_counts
+            .into_iter()
+            .map(|(error_type, count)| StopFailureType { error_type, count })
+            .collect();
+        types.sort_by(|a, b| b.count.cmp(&a.count));
+        types
+    } else {
+        Vec::new()
+    };
+
+    Ok(ErrorSummary {
+        post_tool_use_failure_count,
+        stop_failure_count,
+        stop_failure_types,
+    })
+}
+
+/// Directory event count for the top-directories breakdown.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct DirCount {
+    pub cwd: String,
+    pub count: i64,
+}
+
+/// Get top directories by event count.
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn top_directories(
+    pool: &SqlitePool,
+    since: Option<&str>,
+    limit: i64,
+) -> Result<Vec<DirCount>, Box<dyn std::error::Error>> {
+    let mut sql = String::from("SELECT cwd, COUNT(*) as count FROM events WHERE cwd IS NOT NULL");
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" AND timestamp >= ?");
+        binds.push(since.to_string());
+    }
+
+    sql.push_str(" GROUP BY cwd ORDER BY count DESC LIMIT ?");
+    binds.push(limit.to_string());
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results = rows
+        .iter()
+        .map(|row| DirCount {
+            cwd: row.get("cwd"),
+            count: row.get("count"),
+        })
+        .collect();
+    Ok(results)
+}
+
+/// Get average session duration in seconds, excluding single-event sessions.
+/// Returns `None` if no qualifying sessions exist.
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn avg_session_duration(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    let mut sql = String::from(
+        "SELECT AVG((julianday(last_seen) - julianday(first_seen)) * 86400) as avg_seconds FROM sessions WHERE first_seen != last_seen",
+    );
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" AND last_seen >= ?");
+        binds.push(since.to_string());
+    }
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let row = query.fetch_one(pool).await?;
+    let avg: Option<f64> = row.get("avg_seconds");
+    Ok(avg)
+}
+
+/// Daily event count for the activity histogram.
+#[derive(Debug)]
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub struct DailyCount {
+    pub date: String,
+    pub count: i64,
+}
+
+/// Get daily event counts. Defaults to last 14 days when `since` is `None`.
+#[allow(dead_code)] // Used by cmd_stats in US-0023
+pub async fn daily_activity(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<DailyCount>, Box<dyn std::error::Error>> {
+    let default_since;
+    let since_val = if let Some(s) = since {
+        s
+    } else {
+        default_since = (chrono::Utc::now() - chrono::Duration::days(14))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        &default_since
+    };
+
+    let rows = sqlx::query(
+        "SELECT DATE(timestamp) as day, COUNT(*) as count FROM events WHERE timestamp >= ? GROUP BY day ORDER BY day ASC",
+    )
+    .bind(since_val)
+    .fetch_all(pool)
+    .await?;
+
+    let results = rows
+        .iter()
+        .map(|row| DailyCount {
+            date: row.get("day"),
+            count: row.get("count"),
+        })
+        .collect();
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -457,7 +781,7 @@ mod tests {
             ]
         );
 
-        // Verify all four indexes on events
+        // Verify all five indexes on events (including cwd index from E006 migration)
         let indexes: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name LIKE 'idx_%' ORDER BY name",
         )
@@ -467,6 +791,7 @@ mod tests {
         assert_eq!(
             indexes,
             vec![
+                "idx_events_cwd",
                 "idx_events_session",
                 "idx_events_tool",
                 "idx_events_ts",
@@ -930,5 +1255,410 @@ mod tests {
         let (pool, _dir) = setup_filtered_db().await;
         let deleted = delete_orphaned_sessions(&pool).await.unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    // ── Extended stats tests (E006 / US-0021) ──
+
+    /// Set up a DB with diverse data for extended stats tests.
+    async fn setup_stats_db() -> (SqlitePool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("stats.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        let events = [
+            (
+                "s1",
+                "PreToolUse",
+                Some("Bash"),
+                "/home/user/project-a",
+                "2025-01-10T10:00:00.000Z",
+                "{}",
+            ),
+            (
+                "s1",
+                "PostToolUse",
+                Some("Bash"),
+                "/home/user/project-a",
+                "2025-01-10T10:01:00.000Z",
+                "{}",
+            ),
+            (
+                "s1",
+                "PreToolUse",
+                Some("Read"),
+                "/home/user/project-a",
+                "2025-01-10T10:02:00.000Z",
+                "{}",
+            ),
+            (
+                "s1",
+                "PostToolUse",
+                Some("Read"),
+                "/home/user/project-a",
+                "2025-01-10T10:03:00.000Z",
+                "{}",
+            ),
+            (
+                "s1",
+                "PreToolUse",
+                Some("Bash"),
+                "/home/user/project-a",
+                "2025-01-11T09:00:00.000Z",
+                "{}",
+            ),
+            (
+                "s2",
+                "PreToolUse",
+                Some("Write"),
+                "/home/user/project-b",
+                "2025-01-12T14:00:00.000Z",
+                "{}",
+            ),
+            (
+                "s2",
+                "PostToolUseFailure",
+                Some("Write"),
+                "/home/user/project-b",
+                "2025-01-12T14:01:00.000Z",
+                "{}",
+            ),
+            (
+                "s2",
+                "StopFailure",
+                None,
+                "/home/user/project-b",
+                "2025-01-12T14:02:00.000Z",
+                r#"{"error":"rate_limit"}"#,
+            ),
+            (
+                "s2",
+                "StopFailure",
+                None,
+                "/home/user/project-b",
+                "2025-01-12T14:03:00.000Z",
+                r#"{"error":"rate_limit"}"#,
+            ),
+            (
+                "s2",
+                "StopFailure",
+                None,
+                "/home/user/project-b",
+                "2025-01-12T14:04:00.000Z",
+                r#"{"error":"server_error"}"#,
+            ),
+            (
+                "s2",
+                "SessionEnd",
+                None,
+                "/home/user/project-b",
+                "2025-01-12T15:00:00.000Z",
+                "{}",
+            ),
+        ];
+
+        for (i, (session, event_type, tool, cwd, ts, payload)) in events.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO events (id, timestamp, session_id, event_type, tool_name, cwd, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(i as i64 + 1)
+            .bind(ts)
+            .bind(session)
+            .bind(event_type)
+            .bind(tool)
+            .bind(cwd)
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Set up sessions with proper first_seen/last_seen
+        sqlx::query(
+            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES ('s1', '2025-01-10T10:00:00.000Z', '2025-01-11T09:00:00.000Z', '/home/user/project-a', 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES ('s2', '2025-01-12T14:00:00.000Z', '2025-01-12T15:00:00.000Z', '/home/user/project-b', 6)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn test_migration_adds_cwd_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cwd_idx.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name = 'idx_events_cwd'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, vec!["idx_events_cwd"]);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_top_tools_populated() {
+        let (pool, _dir) = setup_stats_db().await;
+        let tools = top_tools(&pool, None, 10).await.unwrap();
+        assert!(!tools.is_empty());
+        // Bash has 3 events, Read has 1, Write has 1 (PreToolUse only; PostToolUseFailure also has tool_name)
+        assert_eq!(tools[0].tool_name, "Bash");
+        assert_eq!(tools[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_top_tools_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        // Only events from 2025-01-12 onwards
+        let tools = top_tools(&pool, Some("2025-01-12T00:00:00.000Z"), 10)
+            .await
+            .unwrap();
+        // Write has 2 events (PreToolUse + PostToolUseFailure both have tool_name=Write)
+        assert_eq!(tools[0].tool_name, "Write");
+        assert_eq!(tools[0].count, 2);
+        // No Bash or Read events after 2025-01-12
+        assert!(tools.iter().all(|t| t.tool_name != "Bash"));
+    }
+
+    #[tokio::test]
+    async fn test_top_tools_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+        let tools = top_tools(&pool, None, 10).await.unwrap();
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_top_tools_limit() {
+        let (pool, _dir) = setup_stats_db().await;
+        let tools = top_tools(&pool, None, 1).await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "Bash");
+    }
+
+    #[tokio::test]
+    async fn test_event_type_breakdown_populated() {
+        let (pool, _dir) = setup_stats_db().await;
+        let types = event_type_breakdown(&pool, None).await.unwrap();
+        assert!(!types.is_empty());
+        // PreToolUse should be the most common (4 events)
+        assert_eq!(types[0].event_type, "PreToolUse");
+        assert_eq!(types[0].count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_event_type_breakdown_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        let types = event_type_breakdown(&pool, Some("2025-01-12T00:00:00.000Z"))
+            .await
+            .unwrap();
+        // Should only include events from s2 (6 events)
+        let total: i64 = types.iter().map(|t| t.count).sum();
+        assert_eq!(total, 6);
+    }
+
+    #[tokio::test]
+    async fn test_event_type_breakdown_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+        let types = event_type_breakdown(&pool, None).await.unwrap();
+        assert!(types.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_error_summary_with_errors() {
+        let (pool, _dir) = setup_stats_db().await;
+        let errors = error_summary(&pool, None).await.unwrap();
+        assert_eq!(errors.post_tool_use_failure_count, 1);
+        assert_eq!(errors.stop_failure_count, 3);
+        assert_eq!(errors.stop_failure_types.len(), 2);
+        // rate_limit should be first (count 2)
+        assert_eq!(errors.stop_failure_types[0].error_type, "rate_limit");
+        assert_eq!(errors.stop_failure_types[0].count, 2);
+        assert_eq!(errors.stop_failure_types[1].error_type, "server_error");
+        assert_eq!(errors.stop_failure_types[1].count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_error_summary_no_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("no_errors.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        // Insert a non-error event
+        sqlx::query(
+            "INSERT INTO events (timestamp, session_id, event_type, cwd, raw_payload) VALUES ('2025-01-01T10:00:00.000Z', 's1', 'PreToolUse', '/tmp', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let errors = error_summary(&pool, None).await.unwrap();
+        assert_eq!(errors.post_tool_use_failure_count, 0);
+        assert_eq!(errors.stop_failure_count, 0);
+        assert!(errors.stop_failure_types.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_error_summary_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        // Before any StopFailure events
+        let errors = error_summary(&pool, Some("2025-01-13T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert_eq!(errors.post_tool_use_failure_count, 0);
+        assert_eq!(errors.stop_failure_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_top_directories_populated() {
+        let (pool, _dir) = setup_stats_db().await;
+        let dirs = top_directories(&pool, None, 5).await.unwrap();
+        assert_eq!(dirs.len(), 2);
+        // project-b has 6 events, project-a has 5
+        assert_eq!(dirs[0].cwd, "/home/user/project-b");
+        assert_eq!(dirs[0].count, 6);
+        assert_eq!(dirs[1].cwd, "/home/user/project-a");
+        assert_eq!(dirs[1].count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_top_directories_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        let dirs = top_directories(&pool, Some("2025-01-12T00:00:00.000Z"), 5)
+            .await
+            .unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].cwd, "/home/user/project-b");
+    }
+
+    #[tokio::test]
+    async fn test_top_directories_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+        let dirs = top_directories(&pool, None, 5).await.unwrap();
+        assert!(dirs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_normal() {
+        let (pool, _dir) = setup_stats_db().await;
+        let avg = avg_session_duration(&pool, None).await.unwrap();
+        assert!(avg.is_some());
+        let avg = avg.unwrap();
+        // s1: 2025-01-10T10:00 to 2025-01-11T09:00 = 23 hours = 82800s
+        // s2: 2025-01-12T14:00 to 2025-01-12T15:00 = 1 hour = 3600s
+        // avg = (82800 + 3600) / 2 = 43200s
+        assert!((avg - 43200.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_excludes_single_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("single_event.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        // Session with same first_seen and last_seen
+        sqlx::query(
+            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES ('s1', '2025-01-01T10:00:00.000Z', '2025-01-01T10:00:00.000Z', '/tmp', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let avg = avg_session_duration(&pool, None).await.unwrap();
+        assert!(avg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_no_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("no_sessions.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+
+        let avg = avg_session_duration(&pool, None).await.unwrap();
+        assert!(avg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        // Only s2 has last_seen >= 2025-01-12
+        let avg = avg_session_duration(&pool, Some("2025-01-12T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert!(avg.is_some());
+        // s2: 1 hour = 3600s
+        assert!((avg.unwrap() - 3600.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_daily_activity_populated() {
+        let (pool, _dir) = setup_stats_db().await;
+        let activity = daily_activity(&pool, Some("2025-01-10T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert!(!activity.is_empty());
+        // 2025-01-10 should have 4 events, 2025-01-11 should have 1, 2025-01-12 should have 6
+        assert_eq!(activity[0].date, "2025-01-10");
+        assert_eq!(activity[0].count, 4);
+        assert_eq!(activity[1].date, "2025-01-11");
+        assert_eq!(activity[1].count, 1);
+        assert_eq!(activity[2].date, "2025-01-12");
+        assert_eq!(activity[2].count, 6);
+    }
+
+    #[tokio::test]
+    async fn test_daily_activity_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        let activity = daily_activity(&pool, Some("2025-01-12T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].date, "2025-01-12");
+        assert_eq!(activity[0].count, 6);
+    }
+
+    #[tokio::test]
+    async fn test_daily_activity_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+        let activity = daily_activity(&pool, Some("2025-01-01T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert!(activity.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_with_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        let stats = get_stats(&pool, Some("2025-01-12T00:00:00.000Z"))
+            .await
+            .unwrap();
+        assert_eq!(stats.event_count, 6); // only s2 events
+        assert_eq!(stats.session_count, 1); // only s2
+        assert!(stats.oldest_event.is_some());
+        assert!(stats.newest_event.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_without_since() {
+        let (pool, _dir) = setup_stats_db().await;
+        let stats = get_stats(&pool, None).await.unwrap();
+        assert_eq!(stats.event_count, 11);
+        assert_eq!(stats.session_count, 2);
     }
 }

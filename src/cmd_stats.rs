@@ -4,7 +4,7 @@ use crate::db;
 
 /// Display database metrics.
 pub async fn run(pool: &SqlitePool, db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let stats = db::get_stats(pool).await?;
+    let stats = db::get_stats(pool, None).await?;
 
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
@@ -154,7 +154,7 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = db::get_stats(&pool).await.unwrap();
+        let stats = db::get_stats(&pool, None).await.unwrap();
         assert_eq!(stats.event_count, 2);
         assert_eq!(stats.session_count, 2);
         assert!(stats.oldest_event.is_some());
@@ -167,7 +167,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let pool = db::connect(db_path.to_str().unwrap()).await.unwrap();
 
-        let stats = db::get_stats(&pool).await.unwrap();
+        let stats = db::get_stats(&pool, None).await.unwrap();
         assert_eq!(stats.event_count, 0);
         assert_eq!(stats.session_count, 0);
         assert!(stats.oldest_event.is_none());
