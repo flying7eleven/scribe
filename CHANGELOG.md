@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-beta2] - 2026-03-26
+
+### Added
+- Add self-healing config migration with comment preservation ([904ab5c])
+- Add config template and auto-creation on first interactive run ([424fde6])
+- Add --json output mode, integration tests, and complete E006 epic ([22bc3d6])
+- Extend stats handler with dashboard sections and --since flag ([d6ec13f])
+- Add formatting helpers: histogram bars, path truncation, duration ([f6c5d37])
+- Add CWD index migration and extended stats DB queries ([75550d2])
+
+### Changed
+- Add MIT license ([e1d2b75])
+
+[904ab5c]: https://github.com/flying7eleven/scribe/commit/904ab5ce8f0d9ab0eacb8c1fd5ecf537be17ff97
+[424fde6]: https://github.com/flying7eleven/scribe/commit/424fde62ee6891f094572094765807649f36439d
+[22bc3d6]: https://github.com/flying7eleven/scribe/commit/22bc3d6cca8e90a02f8e696a9c22166ce9801b77
+[d6ec13f]: https://github.com/flying7eleven/scribe/commit/d6ec13f7b0e62660fdedb1803e601933443b1101
+[f6c5d37]: https://github.com/flying7eleven/scribe/commit/f6c5d37e2c4417dadc12dbfe0136418b743cca37
+[75550d2]: https://github.com/flying7eleven/scribe/commit/75550d2fa05939f1b2d1028f284ccfe287edf1f2
+[e1d2b75]: https://github.com/flying7eleven/scribe/commit/e1d2b75cbc5a2bb6ce32c4659c8121d0690b7ff2
+
 ## [1.0.0-beta1] - 2026-03-24
 
 ### Added
