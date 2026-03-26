@@ -83,6 +83,9 @@ enum Commands {
         /// Show stats since a duration (e.g. 7d) or date (e.g. 2025-06-01)
         #[arg(long)]
         since: Option<String>,
+        /// Output stats as a single JSON object
+        #[arg(long)]
+        json: bool,
     },
     /// Print shell completion script to stdout
     Completions {
@@ -255,8 +258,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Stats { since } => {
-            if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref()).await {
+        Commands::Stats { since, json } => {
+            if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref(), json).await {
                 eprintln!("scribe: stats error: {e}");
                 std::process::exit(1);
             }

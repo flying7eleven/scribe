@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, Row, SqlitePool};
 
@@ -375,15 +376,13 @@ pub async fn get_stats(
 // ── Extended stats queries (E006) ──
 
 /// Tool usage count for the top-tools breakdown.
-#[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
+#[derive(Debug, Serialize)]
 pub struct ToolCount {
     pub tool_name: String,
     pub count: i64,
 }
 
 /// Get the most frequently used tools, ranked by call count.
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn top_tools(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -418,15 +417,13 @@ pub async fn top_tools(
 }
 
 /// Event type distribution count.
-#[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
+#[derive(Debug, Serialize)]
 pub struct EventTypeCount {
     pub event_type: String,
     pub count: i64,
 }
 
 /// Get event type breakdown (only types with > 0 occurrences).
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn event_type_breakdown(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -458,8 +455,7 @@ pub async fn event_type_breakdown(
 }
 
 /// A StopFailure error type and its count.
-#[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
+#[derive(Debug, Serialize)]
 pub struct StopFailureType {
     pub error_type: String,
     pub count: i64,
@@ -467,7 +463,6 @@ pub struct StopFailureType {
 
 /// Error summary with failure counts and StopFailure type breakdown.
 #[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub struct ErrorSummary {
     pub post_tool_use_failure_count: i64,
     pub stop_failure_count: i64,
@@ -475,7 +470,6 @@ pub struct ErrorSummary {
 }
 
 /// Get error summary: PostToolUseFailure and StopFailure counts, with StopFailure type breakdown.
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn error_summary(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -556,15 +550,13 @@ pub async fn error_summary(
 }
 
 /// Directory event count for the top-directories breakdown.
-#[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
+#[derive(Debug, Serialize)]
 pub struct DirCount {
     pub cwd: String,
     pub count: i64,
 }
 
 /// Get top directories by event count.
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn top_directories(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -599,7 +591,6 @@ pub async fn top_directories(
 
 /// Get average session duration in seconds, excluding single-event sessions.
 /// Returns `None` if no qualifying sessions exist.
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn avg_session_duration(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -625,15 +616,13 @@ pub async fn avg_session_duration(
 }
 
 /// Daily event count for the activity histogram.
-#[derive(Debug)]
-#[allow(dead_code)] // Used by cmd_stats in US-0023
+#[derive(Debug, Serialize)]
 pub struct DailyCount {
     pub date: String,
     pub count: i64,
 }
 
 /// Get daily event counts. Defaults to last 14 days when `since` is `None`.
-#[allow(dead_code)] // Used by cmd_stats in US-0023
 pub async fn daily_activity(
     pool: &SqlitePool,
     since: Option<&str>,

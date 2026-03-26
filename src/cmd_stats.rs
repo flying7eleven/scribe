@@ -1,21 +1,145 @@
 use chrono::NaiveDate;
+use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::cmd_query;
 use crate::db;
+
+/// JSON output structure for `scribe stats --json`.
+#[derive(Serialize)]
+struct StatsJson {
+    db_path: String,
+    db_size_bytes: u64,
+    event_count: i64,
+    session_count: i64,
+    oldest_event: Option<String>,
+    newest_event: Option<String>,
+    avg_session_duration_seconds: Option<f64>,
+    top_tools: Vec<db::ToolCount>,
+    event_types: Vec<db::EventTypeCount>,
+    errors: ErrorsJson,
+    top_directories: Vec<db::DirCount>,
+    daily_activity: Vec<DailyActivityEntry>,
+}
+
+#[derive(Serialize)]
+struct ErrorsJson {
+    post_tool_use_failure: i64,
+    stop_failure: i64,
+    stop_failure_types: Vec<db::StopFailureType>,
+}
+
+#[derive(Serialize)]
+struct DailyActivityEntry {
+    date: String,
+    count: i64,
+}
 
 /// Display database metrics with extended stats dashboard.
 pub async fn run(
     pool: &SqlitePool,
     db_path: &str,
     since: Option<&str>,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve --since to ISO 8601 UTC timestamp
     let resolved_since = since.map(cmd_query::parse_time_spec).transpose()?;
     let since_ref = resolved_since.as_deref();
 
+    // Gather all stats
     let stats = db::get_stats(pool, since_ref).await?;
+    let avg_dur = db::avg_session_duration(pool, since_ref).await?;
+    let tools = db::top_tools(pool, since_ref, 10).await?;
+    let event_types = db::event_type_breakdown(pool, since_ref).await?;
+    let errors = db::error_summary(pool, since_ref).await?;
+    let dirs = db::top_directories(pool, since_ref, 5).await?;
+    let activity = db::daily_activity(pool, since_ref).await?;
+    let filled = fill_zero_days(&activity);
 
+    if json {
+        return run_json(
+            db_path,
+            &stats,
+            avg_dur,
+            tools,
+            event_types,
+            errors,
+            dirs,
+            &filled,
+        );
+    }
+
+    run_text(
+        db_path,
+        since_ref,
+        &stats,
+        avg_dur,
+        &tools,
+        &event_types,
+        &errors,
+        &dirs,
+        &filled,
+    )
+}
+
+/// JSON output mode — single JSON object to stdout.
+#[allow(clippy::too_many_arguments)]
+fn run_json(
+    db_path: &str,
+    stats: &db::DbStats,
+    avg_dur: Option<f64>,
+    tools: Vec<db::ToolCount>,
+    event_types: Vec<db::EventTypeCount>,
+    errors: db::ErrorSummary,
+    dirs: Vec<db::DirCount>,
+    filled: &[(String, i64)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+
+    let daily_activity: Vec<DailyActivityEntry> = filled
+        .iter()
+        .map(|(date, count)| DailyActivityEntry {
+            date: date.clone(),
+            count: *count,
+        })
+        .collect();
+
+    let output = StatsJson {
+        db_path: db_path.to_string(),
+        db_size_bytes,
+        event_count: stats.event_count,
+        session_count: stats.session_count,
+        oldest_event: stats.oldest_event.clone(),
+        newest_event: stats.newest_event.clone(),
+        avg_session_duration_seconds: avg_dur,
+        top_tools: tools,
+        event_types,
+        errors: ErrorsJson {
+            post_tool_use_failure: errors.post_tool_use_failure_count,
+            stop_failure: errors.stop_failure_count,
+            stop_failure_types: errors.stop_failure_types,
+        },
+        top_directories: dirs,
+        daily_activity,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+/// Text output mode — human-readable dashboard.
+#[allow(clippy::too_many_arguments)]
+fn run_text(
+    db_path: &str,
+    since_ref: Option<&str>,
+    stats: &db::DbStats,
+    avg_dur: Option<f64>,
+    tools: &[db::ToolCount],
+    event_types: &[db::EventTypeCount],
+    errors: &db::ErrorSummary,
+    dirs: &[db::DirCount],
+    filled: &[(String, i64)],
+) -> Result<(), Box<dyn std::error::Error>> {
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
         .unwrap_or_else(|_| "unknown".to_string());
@@ -41,8 +165,6 @@ pub async fn run(
     println!("Events:    {}", format_count(stats.event_count));
     println!("Sessions:  {}", format_count(stats.session_count));
 
-    // Avg session duration
-    let avg_dur = db::avg_session_duration(pool, since_ref).await?;
     if let Some(avg) = avg_dur {
         println!("Avg duration:  {}", format_duration(avg));
     }
@@ -56,7 +178,6 @@ pub async fn run(
     }
 
     // ── Top tools ──
-    let tools = db::top_tools(pool, since_ref, 10).await?;
     if !tools.is_empty() {
         println!();
         println!("Top tools:");
@@ -74,13 +195,12 @@ pub async fn run(
     }
 
     // ── Event types ──
-    let event_types = db::event_type_breakdown(pool, since_ref).await?;
     if !event_types.is_empty() {
         println!();
         println!("Event types:");
         let max_count = event_types.iter().map(|t| t.count).max().unwrap_or(0);
         let count_width = format_count(max_count).len();
-        for et in &event_types {
+        for et in event_types {
             println!(
                 "  {:<24} {:>width$}",
                 et.event_type,
@@ -91,7 +211,6 @@ pub async fn run(
     }
 
     // ── Errors ──
-    let errors = db::error_summary(pool, since_ref).await?;
     println!();
     if errors.post_tool_use_failure_count == 0 && errors.stop_failure_count == 0 {
         println!("Errors:              none");
@@ -117,7 +236,6 @@ pub async fn run(
     }
 
     // ── Top directories ──
-    let dirs = db::top_directories(pool, since_ref, 5).await?;
     if !dirs.is_empty() {
         println!();
         println!("Top directories:");
@@ -136,8 +254,7 @@ pub async fn run(
     }
 
     // ── Activity histogram ──
-    let activity = db::daily_activity(pool, since_ref).await?;
-    if !activity.is_empty() {
+    if !filled.is_empty() {
         println!();
         if let Some(s) = since_ref {
             println!("Activity (since {}):", format_timestamp(s));
@@ -145,12 +262,10 @@ pub async fn run(
             println!("Activity (last 14 days):");
         }
 
-        // Fill in zero-count days
-        let filled = fill_zero_days(&activity);
         let max_count = filled.iter().map(|(_, c)| *c).max().unwrap_or(0);
         let count_width = format_count(max_count).len();
 
-        for (date_str, count) in &filled {
+        for (date_str, count) in filled {
             let label = format_date_label(date_str);
             let bar = histogram_bar(*count, max_count, 40);
             println!(
