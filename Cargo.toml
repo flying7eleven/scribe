@@ -8,13 +8,16 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 comfy-table = "7"
+crossterm = { version = "0.28", features = ["event-stream"] }
 csv = "1"
 dirs = "6"
+futures = "0.3"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 sqlx-sqlite = { version = "0.8", features = ["bundled"] }
+ratatui = "0.29"
 toml = "0.8"
 toml_edit = "0.22"
 tokio = { version = "1", features = ["rt", "macros"] }

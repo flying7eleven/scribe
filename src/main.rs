@@ -6,7 +6,9 @@ mod cmd_retain;
 mod cmd_stats;
 mod config;
 mod db;
+mod format;
 mod models;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -91,6 +93,15 @@ enum Commands {
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: clap_complete::Shell,
+    },
+    /// Launch interactive terminal user interface
+    Tui {
+        /// Polling interval in ms for the Live tab (default: 1000)
+        #[arg(long, default_value = "1000")]
+        tick_rate: u64,
+        /// Pre-filter initial data load (duration or date)
+        #[arg(long)]
+        since: Option<String>,
     },
 }
 
@@ -274,6 +285,13 @@ async fn main() {
         Commands::Stats { since, json } => {
             if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref(), json).await {
                 eprintln!("scribe: stats error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Tui { tick_rate, since } => {
+            let tick = std::time::Duration::from_millis(tick_rate);
+            if let Err(e) = tui::run(&pool, &db_path, tick, since).await {
+                eprintln!("scribe: tui error: {e}");
                 std::process::exit(1);
             }
         }
