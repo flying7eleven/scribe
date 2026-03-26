@@ -50,6 +50,9 @@ pub async fn run(
         if app.active_tab == Tab::Sessions && !app.sessions.loaded {
             let _ = app.sessions.load(pool, app.since.as_deref()).await;
         }
+        if app.active_tab == Tab::Events && !app.events.loaded {
+            let _ = app.events.load(pool, app.since.as_deref()).await;
+        }
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
@@ -72,14 +75,20 @@ pub async fn run(
                     KeyCode::Char('2') => app.set_tab(Tab::Events),
                     KeyCode::Char('3') => app.set_tab(Tab::Stats),
                     KeyCode::Char('4') => app.set_tab(Tab::Live),
+                    KeyCode::Tab
+                        if app.active_tab == Tab::Events && app.events.expanded.is_some() =>
+                    {
+                        // Tab toggles detail mode when detail is expanded
+                        app.events.toggle_detail_mode();
+                    }
                     KeyCode::Tab => app.next_tab(),
                     KeyCode::BackTab => app.prev_tab(),
                     // Tab-specific keybindings
-                    _ => {
-                        if app.active_tab == Tab::Sessions {
-                            handle_sessions_key(&mut app, key.code);
-                        }
-                    }
+                    _ => match app.active_tab {
+                        Tab::Sessions => handle_sessions_key(&mut app, key.code),
+                        Tab::Events => handle_events_key(&mut app, key.code),
+                        _ => {}
+                    },
                 }
             }
             Some(AppEvent::Tick) => {
@@ -113,10 +122,33 @@ fn handle_sessions_key(app: &mut App, key: KeyCode) {
         KeyCode::Char('G') => app.sessions.bottom(),
         KeyCode::Enter => {
             // Drill down to Events tab filtered to this session
-            if let Some(_session_id) = app.sessions.selected_session_id() {
-                // Events state will be set up in US-0029
-                // For now, just switch to the Events tab
+            if let Some(session_id) = app.sessions.selected_session_id() {
+                app.events.set_session_filter(session_id.to_string());
                 app.set_tab(Tab::Events);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handle key events specific to the Events tab.
+fn handle_events_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Down | KeyCode::Char('j') => app.events.next(),
+        KeyCode::Up | KeyCode::Char('k') => app.events.prev(),
+        KeyCode::Char('g') => app.events.top(),
+        KeyCode::Char('G') => app.events.bottom(),
+        KeyCode::Enter => app.events.toggle_expand(),
+        KeyCode::Esc => {
+            if app.events.expanded.is_some() {
+                app.events.expanded = None;
+            } else if app.events.session_filter.is_some() {
+                app.events.clear_session_filter();
+            }
+        }
+        KeyCode::Backspace => {
+            if app.events.session_filter.is_some() {
+                app.events.clear_session_filter();
             }
         }
         _ => {}

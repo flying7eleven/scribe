@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use super::tabs::events::EventsState;
 use super::tabs::sessions::SessionsState;
 
 /// The four navigable tabs in the TUI.
@@ -52,6 +53,7 @@ pub struct App {
     pub tick_rate: Duration,
     pub since: Option<String>,
     pub sessions: SessionsState,
+    pub events: EventsState,
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
             tick_rate,
             since,
             sessions: SessionsState::new(),
+            events: EventsState::new(),
         }
     }
 
