@@ -59,6 +59,72 @@ fn format_count(n: i64) -> String {
     result.chars().rev().collect()
 }
 
+/// Render a histogram bar of `value` relative to `max_value`, capped at `max_width` characters.
+#[allow(dead_code)] // Used by cmd_stats handler in US-0023
+pub fn histogram_bar(value: i64, max_value: i64, max_width: usize) -> String {
+    if value == 0 || max_value == 0 {
+        return String::new();
+    }
+    let width = (value as f64 / max_value as f64 * max_width as f64).round() as usize;
+    let width = width.max(1); // at least 1 char for non-zero values
+    "\u{2588}".repeat(width)
+}
+
+/// Truncate a path to fit within `max_width` characters.
+/// Preserves the last meaningful path segments, replacing leading segments with `...`.
+#[allow(dead_code)] // Used by cmd_stats handler in US-0023
+pub fn truncate_path(path: &str, max_width: usize) -> String {
+    if path.len() <= max_width {
+        return path.to_string();
+    }
+
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let prefix = "...";
+
+    // Try progressively fewer trailing segments
+    for start in 1..segments.len() {
+        let tail = segments[start..].join("/");
+        let candidate = format!("{prefix}/{tail}");
+        if candidate.len() <= max_width {
+            return candidate;
+        }
+    }
+
+    // Even the last segment + prefix is too long — hard truncate from the left
+    let truncated = &path[path.len().saturating_sub(max_width.saturating_sub(3))..];
+    format!("{prefix}{truncated}")
+}
+
+/// Format a duration in seconds into a human-friendly string.
+#[allow(dead_code)] // Used by cmd_stats handler in US-0023
+pub fn format_duration(seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return "< 1s".to_string();
+    }
+
+    let total_secs = seconds.round() as u64;
+
+    if total_secs == 0 {
+        return "< 1s".to_string();
+    }
+
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        if secs > 0 && mins < 10 {
+            format!("{mins}m {secs}s")
+        } else {
+            format!("{mins}m")
+        }
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn format_timestamp(ts: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
         return dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -119,6 +185,111 @@ mod tests {
             format_timestamp("2025-06-01T14:30:05.123Z"),
             "2025-06-01 14:30:05"
         );
+    }
+
+    // ── Histogram bar tests ──
+
+    #[test]
+    fn test_histogram_bar_full() {
+        let bar = histogram_bar(500, 500, 40);
+        assert_eq!(bar.chars().count(), 40);
+        assert!(bar.chars().all(|c| c == '\u{2588}'));
+    }
+
+    #[test]
+    fn test_histogram_bar_half() {
+        let bar = histogram_bar(250, 500, 40);
+        assert_eq!(bar.chars().count(), 20);
+    }
+
+    #[test]
+    fn test_histogram_bar_zero_value() {
+        assert_eq!(histogram_bar(0, 500, 40), "");
+    }
+
+    #[test]
+    fn test_histogram_bar_zero_max() {
+        assert_eq!(histogram_bar(100, 0, 40), "");
+    }
+
+    #[test]
+    fn test_histogram_bar_small_value_at_least_one() {
+        let bar = histogram_bar(1, 500, 40);
+        assert!(!bar.is_empty());
+        assert!(bar.chars().count() >= 1);
+    }
+
+    // ── Path truncation tests ──
+
+    #[test]
+    fn test_truncate_path_short() {
+        assert_eq!(truncate_path("/short", 20), "/short");
+    }
+
+    #[test]
+    fn test_truncate_path_long() {
+        let result = truncate_path("/home/user/projects/api", 20);
+        assert!(result.len() <= 20);
+        assert!(result.starts_with("..."));
+        assert!(result.ends_with("/api"));
+    }
+
+    #[test]
+    fn test_truncate_path_preserves_trailing() {
+        let result = truncate_path("/home/user/projects/frontend/src/components", 30);
+        assert!(result.len() <= 30);
+        assert!(result.starts_with("..."));
+        assert!(result.contains("components"));
+    }
+
+    #[test]
+    fn test_truncate_path_exact_fit() {
+        let path = "/a/b";
+        assert_eq!(truncate_path(path, 4), "/a/b");
+    }
+
+    #[test]
+    fn test_truncate_path_very_narrow() {
+        let result = truncate_path("/home/user/very/long/path", 10);
+        assert!(result.len() <= 10 || result.starts_with("..."));
+    }
+
+    // ── Duration formatting tests ──
+
+    #[test]
+    fn test_format_duration_hours_minutes() {
+        assert_eq!(format_duration(7440.0), "2h 4m");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_only() {
+        assert_eq!(format_duration(2700.0), "45m");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_seconds() {
+        assert_eq!(format_duration(192.0), "3m 12s");
+    }
+
+    #[test]
+    fn test_format_duration_seconds_only() {
+        assert_eq!(format_duration(42.0), "42s");
+    }
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(0.0), "< 1s");
+    }
+
+    #[test]
+    fn test_format_duration_negative() {
+        assert_eq!(format_duration(-5.0), "< 1s");
+    }
+
+    #[test]
+    fn test_format_duration_large_minutes_no_seconds() {
+        // >= 10 minutes: don't show seconds
+        assert_eq!(format_duration(630.0), "10m");
     }
 
     #[tokio::test]
