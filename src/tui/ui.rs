@@ -7,7 +7,10 @@ use ratatui::{
 };
 
 use super::tabs::events::{self, DetailMode};
-use crate::format::{format_timestamp, truncate_path};
+use crate::format::{
+    format_count, format_date_label, format_duration, format_size, format_timestamp, histogram_bar,
+    truncate_path,
+};
 
 use super::app::{App, Tab};
 use super::help;
@@ -50,6 +53,7 @@ fn draw_tab_content(frame: &mut Frame, app: &App, area: Rect) {
     match app.active_tab {
         Tab::Sessions => draw_sessions_tab(frame, app, area),
         Tab::Events => draw_events_tab(frame, app, area),
+        Tab::Stats => draw_stats_tab(frame, app, area),
         _ => draw_placeholder(frame, app.active_tab.title(), area),
     }
 }
@@ -287,4 +291,169 @@ fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
     ))
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, status_chunk);
+}
+
+/// Draw the Stats tab as a scrollable text dashboard.
+fn draw_stats_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let st = &app.stats;
+
+    let Some(ref stats) = st.stats else {
+        let loading = Paragraph::new("Loading...")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title(" Stats "));
+        frame.render_widget(loading, area);
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(format!("Database:    {}", st.db_path)));
+    lines.push(Line::from(format!(
+        "Size:        {}",
+        format_size(st.db_size)
+    )));
+    lines.push(Line::from(format!(
+        "Events:      {}",
+        format_count(stats.event_count)
+    )));
+    lines.push(Line::from(format!(
+        "Sessions:    {}",
+        format_count(stats.session_count)
+    )));
+    if let Some(avg) = st.avg_duration {
+        lines.push(Line::from(format!(
+            "Avg duration:  {}",
+            format_duration(avg)
+        )));
+    }
+    let oldest = stats
+        .oldest_event
+        .as_deref()
+        .map(format_timestamp)
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    let newest = stats
+        .newest_event
+        .as_deref()
+        .map(format_timestamp)
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    lines.push(Line::from(format!("Oldest:      {oldest}")));
+    lines.push(Line::from(format!("Newest:      {newest}")));
+
+    if stats.event_count == 0 {
+        let content = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Stats "))
+            .scroll((st.scroll_offset, 0));
+        frame.render_widget(content, area);
+        return;
+    }
+
+    // Top tools
+    if !st.tools.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Top tools:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for (i, tool) in st.tools.iter().enumerate() {
+            lines.push(Line::from(format!(
+                "  {:>2}. {:<20} {}",
+                i + 1,
+                tool.tool_name,
+                format_count(tool.count)
+            )));
+        }
+    }
+
+    // Event types
+    if !st.event_types.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Event types:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for et in &st.event_types {
+            lines.push(Line::from(format!(
+                "  {:<24} {}",
+                et.event_type,
+                format_count(et.count)
+            )));
+        }
+    }
+
+    // Errors
+    if let Some(ref errors) = st.errors {
+        lines.push(Line::from(""));
+        if errors.post_tool_use_failure_count == 0 && errors.stop_failure_count == 0 {
+            lines.push(Line::from("Errors:              none"));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Errors:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            if errors.post_tool_use_failure_count > 0 {
+                lines.push(Line::from(format!(
+                    "  {:<24} {}",
+                    "PostToolUseFailure",
+                    format_count(errors.post_tool_use_failure_count)
+                )));
+            }
+            if errors.stop_failure_count > 0 {
+                lines.push(Line::from(format!(
+                    "  {:<24} {}",
+                    "StopFailure",
+                    format_count(errors.stop_failure_count)
+                )));
+                for sf in &errors.stop_failure_types {
+                    lines.push(Line::from(format!(
+                        "    {:<22} {}",
+                        sf.error_type,
+                        format_count(sf.count)
+                    )));
+                }
+            }
+        }
+    }
+
+    // Top directories
+    if !st.dirs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Top directories:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for (i, dir) in st.dirs.iter().enumerate() {
+            let path = truncate_path(&dir.cwd, 40);
+            lines.push(Line::from(format!(
+                "  {:>2}. {:<40} {}",
+                i + 1,
+                path,
+                format_count(dir.count)
+            )));
+        }
+    }
+
+    // Activity histogram
+    if !st.activity.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Activity:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let max_count = st.activity.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        for (date_str, count) in &st.activity {
+            let label = format_date_label(date_str);
+            let bar = histogram_bar(*count, max_count, 30);
+            lines.push(Line::from(format!(
+                "  {label}  {:<30} {}",
+                bar,
+                format_count(*count)
+            )));
+        }
+    }
+
+    let content = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Stats "))
+        .scroll((st.scroll_offset, 0));
+    frame.render_widget(content, area);
 }

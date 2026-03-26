@@ -1,5 +1,5 @@
 pub mod events;
 pub mod sessions;
+pub mod stats;
 // Tab implementations added in subsequent stories:
-// - US-0030: stats.rs
 // - US-0031: live.rs

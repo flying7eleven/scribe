@@ -285,7 +285,7 @@ fn run_text(
 }
 
 /// Fill in zero-count days between first and last date in the activity data.
-fn fill_zero_days(activity: &[db::DailyCount]) -> Vec<(String, i64)> {
+pub fn fill_zero_days(activity: &[db::DailyCount]) -> Vec<(String, i64)> {
     if activity.is_empty() {
         return Vec::new();
     }

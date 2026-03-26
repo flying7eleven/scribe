@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use super::tabs::events::EventsState;
 use super::tabs::sessions::SessionsState;
+use super::tabs::stats::StatsState;
 
 /// The four navigable tabs in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,20 +53,24 @@ pub struct App {
     #[allow(dead_code)] // consumed by Live tab (US-0031)
     pub tick_rate: Duration,
     pub since: Option<String>,
+    pub db_path: String,
     pub sessions: SessionsState,
     pub events: EventsState,
+    pub stats: StatsState,
 }
 
 impl App {
-    pub fn new(tick_rate: Duration, since: Option<String>) -> Self {
+    pub fn new(tick_rate: Duration, since: Option<String>, db_path: String) -> Self {
         Self {
             active_tab: Tab::Sessions,
             show_help: false,
             should_quit: false,
             tick_rate,
             since,
+            db_path,
             sessions: SessionsState::new(),
             events: EventsState::new(),
+            stats: StatsState::new(),
         }
     }
 
@@ -114,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_app_tab_switching() {
-        let mut app = App::new(Duration::from_secs(1), None);
+        let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert_eq!(app.active_tab, Tab::Sessions);
 
         app.next_tab();
@@ -132,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_app_prev_tab_wraps() {
-        let mut app = App::new(Duration::from_secs(1), None);
+        let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert_eq!(app.active_tab, Tab::Sessions);
 
         app.prev_tab(); // wraps to Live
@@ -144,14 +149,14 @@ mod tests {
 
     #[test]
     fn test_app_set_tab() {
-        let mut app = App::new(Duration::from_secs(1), None);
+        let mut app = App::new(Duration::from_secs(1), None, String::new());
         app.set_tab(Tab::Stats);
         assert_eq!(app.active_tab, Tab::Stats);
     }
 
     #[test]
     fn test_app_toggle_help() {
-        let mut app = App::new(Duration::from_secs(1), None);
+        let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert!(!app.show_help);
         app.toggle_help();
         assert!(app.show_help);
@@ -161,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_app_quit() {
-        let mut app = App::new(Duration::from_secs(1), None);
+        let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert!(!app.should_quit);
         app.quit();
         assert!(app.should_quit);

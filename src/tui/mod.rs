@@ -21,7 +21,7 @@ use event::{AppEvent, EventHandler};
 /// Run the TUI application.
 pub async fn run(
     pool: &SqlitePool,
-    _db_path: &str,
+    db_path: &str,
     tick_rate: Duration,
     since: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -41,7 +41,7 @@ pub async fn run(
     }));
 
     // Create app state and event handler
-    let mut app = App::new(tick_rate, since);
+    let mut app = App::new(tick_rate, since, db_path.to_string());
     let mut events = EventHandler::new(tick_rate);
 
     // Main event loop
@@ -52,6 +52,12 @@ pub async fn run(
         }
         if app.active_tab == Tab::Events && !app.events.loaded {
             let _ = app.events.load(pool, app.since.as_deref()).await;
+        }
+        if app.active_tab == Tab::Stats && !app.stats.loaded {
+            let _ = app
+                .stats
+                .load(pool, &app.db_path, app.since.as_deref())
+                .await;
         }
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -73,7 +79,10 @@ pub async fn run(
                     KeyCode::Char('?') => app.toggle_help(),
                     KeyCode::Char('1') => app.set_tab(Tab::Sessions),
                     KeyCode::Char('2') => app.set_tab(Tab::Events),
-                    KeyCode::Char('3') => app.set_tab(Tab::Stats),
+                    KeyCode::Char('3') => {
+                        app.stats.loaded = false; // refresh on switch
+                        app.set_tab(Tab::Stats);
+                    }
                     KeyCode::Char('4') => app.set_tab(Tab::Live),
                     KeyCode::Tab
                         if app.active_tab == Tab::Events && app.events.expanded.is_some() =>
@@ -87,6 +96,7 @@ pub async fn run(
                     _ => match app.active_tab {
                         Tab::Sessions => handle_sessions_key(&mut app, key.code),
                         Tab::Events => handle_events_key(&mut app, key.code),
+                        Tab::Stats => handle_stats_key(&mut app, key.code),
                         _ => {}
                     },
                 }
@@ -151,6 +161,17 @@ fn handle_events_key(app: &mut App, key: KeyCode) {
                 app.events.clear_session_filter();
             }
         }
+        _ => {}
+    }
+}
+
+/// Handle key events specific to the Stats tab.
+fn handle_stats_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Down | KeyCode::Char('j') => app.stats.scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.stats.scroll_up(),
+        KeyCode::Char('g') => app.stats.scroll_top(),
+        KeyCode::Char('G') => app.stats.scroll_bottom(),
         _ => {}
     }
 }
