@@ -1,10 +1,20 @@
+use chrono::NaiveDate;
 use sqlx::SqlitePool;
 
+use crate::cmd_query;
 use crate::db;
 
-/// Display database metrics.
-pub async fn run(pool: &SqlitePool, db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let stats = db::get_stats(pool, None).await?;
+/// Display database metrics with extended stats dashboard.
+pub async fn run(
+    pool: &SqlitePool,
+    db_path: &str,
+    since: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve --since to ISO 8601 UTC timestamp
+    let resolved_since = since.map(cmd_query::parse_time_spec).transpose()?;
+    let since_ref = resolved_since.as_deref();
+
+    let stats = db::get_stats(pool, since_ref).await?;
 
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
@@ -21,14 +31,201 @@ pub async fn run(pool: &SqlitePool, db_path: &str) -> Result<(), Box<dyn std::er
         .map(format_timestamp)
         .unwrap_or_else(|| "\u{2014}".to_string());
 
+    // ── Header ──
     println!("Database:  {db_path}");
     println!("Size:      {file_size}");
+    if let Some(since_ts) = since_ref {
+        let period = format_period(since_ts);
+        println!("Period:    {period}");
+    }
     println!("Events:    {}", format_count(stats.event_count));
     println!("Sessions:  {}", format_count(stats.session_count));
+
+    // Avg session duration
+    let avg_dur = db::avg_session_duration(pool, since_ref).await?;
+    if let Some(avg) = avg_dur {
+        println!("Avg duration:  {}", format_duration(avg));
+    }
+
     println!("Oldest:    {oldest}");
     println!("Newest:    {newest}");
 
+    // Skip extended sections if DB is empty
+    if stats.event_count == 0 {
+        return Ok(());
+    }
+
+    // ── Top tools ──
+    let tools = db::top_tools(pool, since_ref, 10).await?;
+    if !tools.is_empty() {
+        println!();
+        println!("Top tools:");
+        let max_count = tools.iter().map(|t| t.count).max().unwrap_or(0);
+        let count_width = format_count(max_count).len();
+        for (i, tool) in tools.iter().enumerate() {
+            println!(
+                "  {:>2}. {:<20} {:>width$}",
+                i + 1,
+                tool.tool_name,
+                format_count(tool.count),
+                width = count_width
+            );
+        }
+    }
+
+    // ── Event types ──
+    let event_types = db::event_type_breakdown(pool, since_ref).await?;
+    if !event_types.is_empty() {
+        println!();
+        println!("Event types:");
+        let max_count = event_types.iter().map(|t| t.count).max().unwrap_or(0);
+        let count_width = format_count(max_count).len();
+        for et in &event_types {
+            println!(
+                "  {:<24} {:>width$}",
+                et.event_type,
+                format_count(et.count),
+                width = count_width
+            );
+        }
+    }
+
+    // ── Errors ──
+    let errors = db::error_summary(pool, since_ref).await?;
+    println!();
+    if errors.post_tool_use_failure_count == 0 && errors.stop_failure_count == 0 {
+        println!("Errors:              none");
+    } else {
+        println!("Errors:");
+        if errors.post_tool_use_failure_count > 0 {
+            println!(
+                "  {:<24} {:>6}",
+                "PostToolUseFailure",
+                format_count(errors.post_tool_use_failure_count)
+            );
+        }
+        if errors.stop_failure_count > 0 {
+            println!(
+                "  {:<24} {:>6}",
+                "StopFailure",
+                format_count(errors.stop_failure_count)
+            );
+            for sf in &errors.stop_failure_types {
+                println!("    {:<22} {:>6}", sf.error_type, format_count(sf.count));
+            }
+        }
+    }
+
+    // ── Top directories ──
+    let dirs = db::top_directories(pool, since_ref, 5).await?;
+    if !dirs.is_empty() {
+        println!();
+        println!("Top directories:");
+        let max_count = dirs.iter().map(|d| d.count).max().unwrap_or(0);
+        let count_width = format_count(max_count).len();
+        for (i, dir) in dirs.iter().enumerate() {
+            let path = truncate_path(&dir.cwd, 40);
+            println!(
+                "  {:>2}. {:<40} {:>width$}",
+                i + 1,
+                path,
+                format_count(dir.count),
+                width = count_width
+            );
+        }
+    }
+
+    // ── Activity histogram ──
+    let activity = db::daily_activity(pool, since_ref).await?;
+    if !activity.is_empty() {
+        println!();
+        if let Some(s) = since_ref {
+            println!("Activity (since {}):", format_timestamp(s));
+        } else {
+            println!("Activity (last 14 days):");
+        }
+
+        // Fill in zero-count days
+        let filled = fill_zero_days(&activity);
+        let max_count = filled.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        let count_width = format_count(max_count).len();
+
+        for (date_str, count) in &filled {
+            let label = format_date_label(date_str);
+            let bar = histogram_bar(*count, max_count, 40);
+            println!(
+                "  {label}  {:<40} {:>width$}",
+                bar,
+                format_count(*count),
+                width = count_width
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// Format the --since period line, e.g. "since 2025-06-17 (7 days)"
+fn format_period(since_ts: &str) -> String {
+    let date_part = format_timestamp(since_ts);
+    let now = chrono::Utc::now();
+
+    // Try to parse the since timestamp and compute relative days
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(since_ts, "%Y-%m-%dT%H:%M:%S%.fZ") {
+        let days = (now.naive_utc() - dt).num_days();
+        if days > 0 {
+            return format!("since {date_part} ({days} days)");
+        }
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(since_ts) {
+        let days = (now - dt.with_timezone(&chrono::Utc)).num_days();
+        if days > 0 {
+            return format!("since {date_part} ({days} days)");
+        }
+    }
+
+    format!("since {date_part}")
+}
+
+/// Format a date string (YYYY-MM-DD) as "Mon DD" for histogram labels.
+fn format_date_label(date_str: &str) -> String {
+    if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        return date.format("%b %d").to_string();
+    }
+    date_str.to_string()
+}
+
+/// Fill in zero-count days between first and last date in the activity data.
+fn fill_zero_days(activity: &[db::DailyCount]) -> Vec<(String, i64)> {
+    if activity.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    let first = &activity[0].date;
+    let last = &activity[activity.len() - 1].date;
+
+    let Ok(start_date) = NaiveDate::parse_from_str(first, "%Y-%m-%d") else {
+        return activity.iter().map(|d| (d.date.clone(), d.count)).collect();
+    };
+    let Ok(end_date) = NaiveDate::parse_from_str(last, "%Y-%m-%d") else {
+        return activity.iter().map(|d| (d.date.clone(), d.count)).collect();
+    };
+
+    let count_map: std::collections::HashMap<&str, i64> = activity
+        .iter()
+        .map(|d| (d.date.as_str(), d.count))
+        .collect();
+
+    let mut current = start_date;
+    while current <= end_date {
+        let key = current.format("%Y-%m-%d").to_string();
+        let count = count_map.get(key.as_str()).copied().unwrap_or(0);
+        result.push((key, count));
+        current += chrono::Duration::days(1);
+    }
+
+    result
 }
 
 fn format_size(bytes: u64) -> String {
@@ -60,7 +257,6 @@ fn format_count(n: i64) -> String {
 }
 
 /// Render a histogram bar of `value` relative to `max_value`, capped at `max_width` characters.
-#[allow(dead_code)] // Used by cmd_stats handler in US-0023
 pub fn histogram_bar(value: i64, max_value: i64, max_width: usize) -> String {
     if value == 0 || max_value == 0 {
         return String::new();
@@ -72,7 +268,6 @@ pub fn histogram_bar(value: i64, max_value: i64, max_width: usize) -> String {
 
 /// Truncate a path to fit within `max_width` characters.
 /// Preserves the last meaningful path segments, replacing leading segments with `...`.
-#[allow(dead_code)] // Used by cmd_stats handler in US-0023
 pub fn truncate_path(path: &str, max_width: usize) -> String {
     if path.len() <= max_width {
         return path.to_string();
@@ -96,7 +291,6 @@ pub fn truncate_path(path: &str, max_width: usize) -> String {
 }
 
 /// Format a duration in seconds into a human-friendly string.
-#[allow(dead_code)] // Used by cmd_stats handler in US-0023
 pub fn format_duration(seconds: f64) -> String {
     if seconds <= 0.0 {
         return "< 1s".to_string();

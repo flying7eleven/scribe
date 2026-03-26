@@ -79,7 +79,11 @@ enum Commands {
         duration: String,
     },
     /// Show database metrics
-    Stats,
+    Stats {
+        /// Show stats since a duration (e.g. 7d) or date (e.g. 2025-06-01)
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Print shell completion script to stdout
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
@@ -251,8 +255,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Stats => {
-            if let Err(e) = cmd_stats::run(&pool, &db_path).await {
+        Commands::Stats { since } => {
+            if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref()).await {
                 eprintln!("scribe: stats error: {e}");
                 std::process::exit(1);
             }
