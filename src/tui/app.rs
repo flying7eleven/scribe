@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::tabs::events::EventsState;
+use super::tabs::live::LiveState;
 use super::tabs::sessions::SessionsState;
 use super::tabs::stats::StatsState;
 
@@ -57,6 +58,7 @@ pub struct App {
     pub sessions: SessionsState,
     pub events: EventsState,
     pub stats: StatsState,
+    pub live: LiveState,
 }
 
 impl App {
@@ -71,6 +73,7 @@ impl App {
             sessions: SessionsState::new(),
             events: EventsState::new(),
             stats: StatsState::new(),
+            live: LiveState::new(),
         }
     }
 

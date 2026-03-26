@@ -54,20 +54,8 @@ fn draw_tab_content(frame: &mut Frame, app: &App, area: Rect) {
         Tab::Sessions => draw_sessions_tab(frame, app, area),
         Tab::Events => draw_events_tab(frame, app, area),
         Tab::Stats => draw_stats_tab(frame, app, area),
-        _ => draw_placeholder(frame, app.active_tab.title(), area),
+        Tab::Live => draw_live_tab(frame, app, area),
     }
-}
-
-/// Draw a placeholder for tabs not yet implemented.
-fn draw_placeholder(frame: &mut Frame, label: &str, area: Rect) {
-    let content = Paragraph::new(format!("  {label}  "))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", label)),
-        );
-    frame.render_widget(content, area);
 }
 
 /// Draw the Sessions tab with a table of sessions.
@@ -456,4 +444,107 @@ fn draw_stats_tab(frame: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Stats "))
         .scroll((st.scroll_offset, 0));
     frame.render_widget(content, area);
+}
+
+/// Draw the Live tab with stats summary and scrolling event feed.
+fn draw_live_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let live = &app.live;
+
+    // Split into top stats pane and bottom feed pane
+    let chunks = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    // Top pane: stats summary
+    let stats_text = if let Some(ref stats) = live.stats_snapshot {
+        format!(
+            "  Events: {}    Sessions: {}    Rate: {:.1}/min    Uptime: {}",
+            format_count(stats.event_count),
+            format_count(stats.session_count),
+            live.events_per_minute,
+            live.uptime()
+        )
+    } else {
+        "  Waiting for data...".to_string()
+    };
+
+    let stats_block = Paragraph::new(stats_text)
+        .block(Block::default().borders(Borders::ALL).title(" Live Stats "));
+    frame.render_widget(stats_block, chunks[0]);
+
+    // Bottom pane: event feed
+    if live.feed.is_empty() {
+        let empty = Paragraph::new("  Waiting for events...")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title(" Event Feed "));
+        frame.render_widget(empty, chunks[1]);
+    } else {
+        let header = Row::new(vec![
+            Cell::from("Timestamp"),
+            Cell::from("Event Type"),
+            Cell::from("Tool"),
+            Cell::from("Session"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        // Calculate visible window based on scroll position
+        let visible_height = chunks[1].height.saturating_sub(3) as usize; // borders + header
+        let total = live.feed.len();
+        let start = if live.auto_scroll {
+            total.saturating_sub(visible_height)
+        } else {
+            live.feed_scroll.min(total.saturating_sub(visible_height))
+        };
+        let end = (start + visible_height).min(total);
+
+        let rows: Vec<Row> = live
+            .feed
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .map(|e| {
+                let sid = if e.session_id.len() > 8 {
+                    &e.session_id[..8]
+                } else {
+                    &e.session_id
+                };
+                Row::new(vec![
+                    Cell::from(format_timestamp(&e.timestamp)),
+                    Cell::from(e.event_type.clone()),
+                    Cell::from(e.tool_name.clone().unwrap_or_default()),
+                    Cell::from(sid.to_string()),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(21),
+                Constraint::Length(22),
+                Constraint::Length(16),
+                Constraint::Min(10),
+            ],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(" Event Feed "));
+        frame.render_widget(table, chunks[1]);
+    }
+
+    // Status line
+    let pause_hint = if !live.auto_scroll {
+        " (paused \u{2014} press G to resume)"
+    } else {
+        ""
+    };
+    let status = Paragraph::new(format!(" {} events in feed{pause_hint}", live.feed_len()))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, chunks[2]);
 }

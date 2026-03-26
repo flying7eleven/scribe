@@ -59,6 +59,9 @@ pub async fn run(
                 .load(pool, &app.db_path, app.since.as_deref())
                 .await;
         }
+        if app.active_tab == Tab::Live && !app.live.initialized {
+            let _ = app.live.initialize(pool).await;
+        }
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
@@ -97,12 +100,14 @@ pub async fn run(
                         Tab::Sessions => handle_sessions_key(&mut app, key.code),
                         Tab::Events => handle_events_key(&mut app, key.code),
                         Tab::Stats => handle_stats_key(&mut app, key.code),
-                        _ => {}
+                        Tab::Live => handle_live_key(&mut app, key.code),
                     },
                 }
             }
             Some(AppEvent::Tick) => {
-                // Live tab polling will be added in US-0031
+                if app.active_tab == Tab::Live && app.live.initialized {
+                    let _ = app.live.poll(pool).await;
+                }
             }
             Some(AppEvent::Resize(_, _)) => {
                 // ratatui handles resize automatically on next draw
@@ -172,6 +177,16 @@ fn handle_stats_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.stats.scroll_up(),
         KeyCode::Char('g') => app.stats.scroll_top(),
         KeyCode::Char('G') => app.stats.scroll_bottom(),
+        _ => {}
+    }
+}
+
+/// Handle key events specific to the Live tab.
+fn handle_live_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => app.live.scroll_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.live.scroll_down(),
+        KeyCode::Char('G') => app.live.scroll_to_bottom(),
         _ => {}
     }
 }
