@@ -113,9 +113,19 @@ enum QuerySub {
     },
 }
 
+/// Returns true for subcommands that are user-interactive (not the `log` hot path).
+fn is_interactive_command(cmd: &Commands) -> bool {
+    !matches!(cmd, Commands::Log)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
+
+    // Auto-create config on first interactive run (never on `log` hot path)
+    if is_interactive_command(&cli.command) {
+        let _ = config::ensure_config_exists();
+    }
 
     let config = config::load_config();
 

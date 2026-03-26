@@ -1,4 +1,30 @@
+use std::path::PathBuf;
+
 use serde::Deserialize;
+
+/// Canonical config template with commented-out defaults.
+/// All fields are commented so compiled defaults remain in effect.
+/// This constant is also the source of truth for config migration (US-0026-E007).
+pub const CONFIG_TEMPLATE: &str = "\
+# Path to the SQLite database file.
+# Default: ~/.claude/scribe.db
+# db_path = \"~/.claude/scribe.db\"
+
+# Automatic retention period. Events older than this are periodically deleted.
+# Examples: \"30d\", \"90d\", \"1y\"
+# Default: disabled (no automatic deletion)
+# retention = \"90d\"
+
+# How often the auto-retention check runs during 'scribe log'.
+# Only relevant when 'retention' is set.
+# Default: \"24h\"
+# retention_check_interval = \"24h\"
+
+# Default number of rows returned by 'scribe query'.
+# Can be overridden with --limit.
+# Default: 50
+# default_query_limit = 50
+";
 
 #[derive(Deserialize, Default)]
 #[allow(dead_code)] // retention fields consumed by E05-S04 (auto-retention)
@@ -9,16 +35,63 @@ pub struct Config {
     pub default_query_limit: Option<i64>,
 }
 
+/// Returns the platform-appropriate config file path.
+/// `~/.config/claude-scribe/config.toml` on Linux.
+pub fn config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("claude-scribe").join("config.toml"))
+}
+
+/// Ensures the config file exists. If missing, creates it with the default template.
+/// Returns `Ok(true)` if the file was created, `Ok(false)` if it already existed.
+/// On failure (permissions, etc.), prints a warning to stderr and returns `Ok(false)`.
+pub fn ensure_config_exists() -> Result<bool, Box<dyn std::error::Error>> {
+    let Some(path) = config_path() else {
+        return Ok(false);
+    };
+    ensure_config_exists_at(&path)
+}
+
+/// Inner implementation that accepts an explicit path (for testing).
+pub fn ensure_config_exists_at(path: &std::path::Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "Warning: could not create config directory {}: {e}",
+                parent.display()
+            );
+            return Ok(false);
+        }
+    }
+
+    if let Err(e) = std::fs::write(path, CONFIG_TEMPLATE) {
+        eprintln!(
+            "Warning: could not create config file {}: {e}",
+            path.display()
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 /// Load config from the platform-appropriate config directory.
 /// Returns `Config::default()` if the file doesn't exist or cannot be parsed.
 pub fn load_config() -> Config {
-    let Some(config_dir) = dirs::config_dir() else {
+    let Some(path) = config_path() else {
         return Config::default();
     };
 
-    let path = config_dir.join("claude-scribe").join("config.toml");
+    load_config_from(&path)
+}
 
-    let content = match std::fs::read_to_string(&path) {
+/// Load config from a specific path.
+/// Returns `Config::default()` if the file doesn't exist or cannot be parsed.
+pub fn load_config_from(path: &std::path::Path) -> Config {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
         Err(e) => {
@@ -42,20 +115,85 @@ pub fn load_config() -> Config {
     }
 }
 
-/// Load config from a specific path (for testing).
-#[cfg(test)]
-pub fn load_config_from(path: &std::path::Path) -> Config {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Config::default(),
-    };
-
-    toml::from_str(&content).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_template_is_valid_toml() {
+        // The template should parse as valid TOML (all fields are comments, so it's an empty doc)
+        let doc: toml_edit::DocumentMut = CONFIG_TEMPLATE.parse().unwrap();
+        // No active keys — everything is commented out
+        assert!(doc.as_table().is_empty());
+    }
+
+    #[test]
+    fn test_template_contains_all_config_fields() {
+        let field_names = [
+            "db_path",
+            "retention",
+            "retention_check_interval",
+            "default_query_limit",
+        ];
+        for field in &field_names {
+            let pattern = format!("# {field} =");
+            assert!(
+                CONFIG_TEMPLATE.contains(&pattern),
+                "CONFIG_TEMPLATE is missing commented field: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_config_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-scribe").join("config.toml");
+
+        let created = ensure_config_exists_at(&path).unwrap();
+        assert!(created);
+        assert!(path.exists());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, CONFIG_TEMPLATE);
+    }
+
+    #[test]
+    fn test_ensure_config_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("config.toml");
+
+        let created = ensure_config_exists_at(&path).unwrap();
+        assert!(created);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_ensure_config_noop_when_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "db_path = \"/custom.db\"\n").unwrap();
+
+        let created = ensure_config_exists_at(&path).unwrap();
+        assert!(!created);
+
+        // Original content preserved
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("/custom.db"));
+    }
+
+    #[test]
+    fn test_created_config_loads_as_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        ensure_config_exists_at(&path).unwrap();
+
+        // All fields are commented out, so load_config_from should return defaults
+        let config = load_config_from(&path);
+        assert!(config.db_path.is_none());
+        assert!(config.retention.is_none());
+        assert!(config.retention_check_interval.is_none());
+        assert!(config.default_query_limit.is_none());
+    }
 
     #[test]
     fn test_parse_full_config() {
