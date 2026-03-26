@@ -20,7 +20,7 @@ use event::{AppEvent, EventHandler};
 
 /// Run the TUI application.
 pub async fn run(
-    _pool: &SqlitePool,
+    pool: &SqlitePool,
     _db_path: &str,
     tick_rate: Duration,
     since: Option<String>,
@@ -46,6 +46,11 @@ pub async fn run(
 
     // Main event loop
     loop {
+        // Lazy-load data for the active tab
+        if app.active_tab == Tab::Sessions && !app.sessions.loaded {
+            let _ = app.sessions.load(pool, app.since.as_deref()).await;
+        }
+
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
         match events.next().await {
@@ -69,8 +74,12 @@ pub async fn run(
                     KeyCode::Char('4') => app.set_tab(Tab::Live),
                     KeyCode::Tab => app.next_tab(),
                     KeyCode::BackTab => app.prev_tab(),
-                    // Tab-specific keybindings will be added in later stories
-                    _ => {}
+                    // Tab-specific keybindings
+                    _ => {
+                        if app.active_tab == Tab::Sessions {
+                            handle_sessions_key(&mut app, key.code);
+                        }
+                    }
                 }
             }
             Some(AppEvent::Tick) => {
@@ -93,4 +102,23 @@ pub async fn run(
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// Handle key events specific to the Sessions tab.
+fn handle_sessions_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Down | KeyCode::Char('j') => app.sessions.next(),
+        KeyCode::Up | KeyCode::Char('k') => app.sessions.prev(),
+        KeyCode::Char('g') => app.sessions.top(),
+        KeyCode::Char('G') => app.sessions.bottom(),
+        KeyCode::Enter => {
+            // Drill down to Events tab filtered to this session
+            if let Some(_session_id) = app.sessions.selected_session_id() {
+                // Events state will be set up in US-0029
+                // For now, just switch to the Events tab
+                app.set_tab(Tab::Events);
+            }
+        }
+        _ => {}
+    }
 }

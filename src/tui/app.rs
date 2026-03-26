@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use super::tabs::sessions::SessionsState;
+
 /// The four navigable tabs in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -48,8 +50,8 @@ pub struct App {
     pub should_quit: bool,
     #[allow(dead_code)] // consumed by Live tab (US-0031)
     pub tick_rate: Duration,
-    #[allow(dead_code)] // consumed by tab data loading (US-0028+)
     pub since: Option<String>,
+    pub sessions: SessionsState,
 }
 
 impl App {
@@ -60,6 +62,7 @@ impl App {
             should_quit: false,
             tick_rate,
             since,
+            sessions: SessionsState::new(),
         }
     }
 
