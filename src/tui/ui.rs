@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use super::filter::{filter_events, filter_sessions};
 use super::tabs::events::{self, DetailMode};
 use crate::format::{
     format_count, format_date_label, format_duration, format_size, format_timestamp, histogram_bar,
@@ -61,6 +62,7 @@ fn draw_tab_content(frame: &mut Frame, app: &App, area: Rect) {
 /// Draw the Sessions tab with a table of sessions.
 fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
     let sessions = &app.sessions;
+    let filtered = filter_sessions(&app.filter, &sessions.sessions);
 
     if sessions.sessions.is_empty() {
         let empty = Paragraph::new("(empty)")
@@ -70,7 +72,7 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Split area into table + status line
+    // Split area into table + status/filter line
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
     let header = Row::new(vec![
@@ -86,12 +88,11 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = sessions
-        .sessions
+    let rows: Vec<Row> = filtered
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let style = if i == sessions.selected {
+        .map(|&idx| {
+            let s = &sessions.sessions[idx];
+            let style = if idx == sessions.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
@@ -136,20 +137,40 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(table, chunks[0]);
 
-    // Status line
-    let count = sessions.sessions.len();
-    let status = Paragraph::new(format!(
-        " {} session{} | ↑↓/jk navigate | Enter drill-down | q quit",
-        count,
-        if count == 1 { "" } else { "s" }
-    ))
-    .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, chunks[1]);
+    // Status / filter line
+    if app.filter.active {
+        let filter_line = format!(
+            "/ {}█  ({} of {} sessions)",
+            app.filter.input,
+            filtered.len(),
+            sessions.sessions.len()
+        );
+        let status = Paragraph::new(filter_line).style(Style::default().fg(Color::Cyan));
+        frame.render_widget(status, chunks[1]);
+    } else if !app.filter.input.is_empty() {
+        let status = Paragraph::new(format!(
+            " {} of {} sessions (/ to filter, Esc to clear)",
+            filtered.len(),
+            sessions.sessions.len()
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(status, chunks[1]);
+    } else {
+        let count = sessions.sessions.len();
+        let status = Paragraph::new(format!(
+            " {} session{} | / filter | Enter drill-down | q quit",
+            count,
+            if count == 1 { "" } else { "s" }
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(status, chunks[1]);
+    }
 }
 
 /// Draw the Events tab with a table and optional inline detail.
 fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
     let ev = &app.events;
+    let filtered = filter_events(&app.filter, &ev.events);
 
     if ev.events.is_empty() {
         let msg = if ev.session_filter.is_some() {
@@ -191,12 +212,11 @@ fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = ev
-        .events
+    let rows: Vec<Row> = filtered
         .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let style = if i == ev.selected {
+        .map(|&idx| {
+            let e = &ev.events[idx];
+            let style = if idx == ev.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
@@ -254,7 +274,7 @@ fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
                 let detail = Paragraph::new(text).block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Detail [{mode_label}] — Tab to toggle ")),
+                        .title(format!(" Detail [{mode_label}] \u{2014} Tab to toggle ")),
                 );
                 frame.render_widget(detail, chunks[1]);
             }
@@ -264,21 +284,35 @@ fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
     // Status line
     let status_chunk = if has_detail { chunks[2] } else { chunks[1] };
 
-    let count = ev.events.len();
-    let filter_hint = if let Some(ref sid) = ev.session_filter {
-        let short = if sid.len() > 12 { &sid[..12] } else { sid };
-        format!(" | Filtered: session {short}... (Esc to clear)")
+    if app.filter.active {
+        let filter_line = format!(
+            "/ {}\u{2588}  ({} of {} events)",
+            app.filter.input,
+            filtered.len(),
+            ev.events.len()
+        );
+        let status = Paragraph::new(filter_line).style(Style::default().fg(Color::Cyan));
+        frame.render_widget(status, status_chunk);
     } else {
-        String::new()
-    };
-
-    let status = Paragraph::new(format!(
-        " {} event{} | Enter expand | Tab toggle view | Esc collapse{filter_hint}",
-        count,
-        if count == 1 { "" } else { "s" }
-    ))
-    .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, status_chunk);
+        let session_hint = if let Some(ref sid) = ev.session_filter {
+            let short = if sid.len() > 12 { &sid[..12] } else { sid };
+            format!(" | session {short}...")
+        } else {
+            String::new()
+        };
+        let filter_count = if !app.filter.input.is_empty() {
+            format!(" ({} of {})", filtered.len(), ev.events.len())
+        } else {
+            String::new()
+        };
+        let status = Paragraph::new(format!(
+            " {} event{}{filter_count} | / filter | Enter expand{session_hint}",
+            filtered.len(),
+            if filtered.len() == 1 { "" } else { "s" }
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(status, status_chunk);
+    }
 }
 
 /// Draw the Stats tab as a scrollable text dashboard.

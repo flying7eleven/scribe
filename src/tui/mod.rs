@@ -1,5 +1,6 @@
 mod app;
 mod event;
+pub(crate) mod filter;
 mod help;
 mod tabs;
 mod ui;
@@ -76,10 +77,28 @@ pub async fn run(
                     continue;
                 }
 
+                // Filter bar captures all input when active
+                if app.filter.active {
+                    match key.code {
+                        KeyCode::Esc => app.filter.deactivate(),
+                        KeyCode::Enter => {
+                            // Confirm filter — keep text, return focus to list
+                            app.filter.active = false;
+                        }
+                        KeyCode::Backspace => app.filter.delete_char(),
+                        KeyCode::Char(c) => app.filter.push_char(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Global keybindings
                 match key.code {
                     KeyCode::Char('q') => app.quit(),
                     KeyCode::Char('?') => app.toggle_help(),
+                    KeyCode::Char('/') if matches!(app.active_tab, Tab::Sessions | Tab::Events) => {
+                        app.filter.activate();
+                    }
                     KeyCode::Char('1') => app.set_tab(Tab::Sessions),
                     KeyCode::Char('2') => app.set_tab(Tab::Events),
                     KeyCode::Char('3') => {

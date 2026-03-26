@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use super::filter::FilterState;
 use super::tabs::events::EventsState;
 use super::tabs::live::LiveState;
 use super::tabs::sessions::SessionsState;
@@ -59,6 +60,7 @@ pub struct App {
     pub events: EventsState,
     pub stats: StatsState,
     pub live: LiveState,
+    pub filter: FilterState,
 }
 
 impl App {
@@ -74,21 +76,25 @@ impl App {
             events: EventsState::new(),
             stats: StatsState::new(),
             live: LiveState::new(),
+            filter: FilterState::new(),
         }
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
         self.active_tab = tab;
+        self.filter.deactivate();
     }
 
     pub fn next_tab(&mut self) {
         let next = (self.active_tab.index() + 1) % Tab::ALL.len();
         self.active_tab = Tab::from_index(next).unwrap_or(Tab::Sessions);
+        self.filter.deactivate();
     }
 
     pub fn prev_tab(&mut self) {
         let prev = (self.active_tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len();
         self.active_tab = Tab::from_index(prev).unwrap_or(Tab::Sessions);
+        self.filter.deactivate();
     }
 
     pub fn toggle_help(&mut self) {
