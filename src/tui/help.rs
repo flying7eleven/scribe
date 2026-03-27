@@ -19,7 +19,7 @@ pub fn draw_help(frame: &mut Frame) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  1-4       ", Style::default().fg(Color::Cyan)),
+            Span::styled("  1-5       ", Style::default().fg(Color::Cyan)),
             Span::raw("Switch to tab"),
         ]),
         Line::from(vec![

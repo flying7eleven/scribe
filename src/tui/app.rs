@@ -3,20 +3,28 @@ use std::time::Duration;
 use super::filter::FilterState;
 use super::tabs::events::EventsState;
 use super::tabs::live::LiveState;
+use super::tabs::policy::PolicyState;
 use super::tabs::sessions::SessionsState;
 use super::tabs::stats::StatsState;
 
-/// The four navigable tabs in the TUI.
+/// The five navigable tabs in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Sessions,
     Events,
     Stats,
     Live,
+    Policy,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Sessions, Tab::Events, Tab::Stats, Tab::Live];
+    pub const ALL: [Tab; 5] = [
+        Tab::Sessions,
+        Tab::Events,
+        Tab::Stats,
+        Tab::Live,
+        Tab::Policy,
+    ];
 
     pub fn title(&self) -> &'static str {
         match self {
@@ -24,6 +32,7 @@ impl Tab {
             Tab::Events => "Events",
             Tab::Stats => "Stats",
             Tab::Live => "Live",
+            Tab::Policy => "Policy",
         }
     }
 
@@ -33,6 +42,7 @@ impl Tab {
             Tab::Events => 1,
             Tab::Stats => 2,
             Tab::Live => 3,
+            Tab::Policy => 4,
         }
     }
 
@@ -42,6 +52,7 @@ impl Tab {
             1 => Some(Tab::Events),
             2 => Some(Tab::Stats),
             3 => Some(Tab::Live),
+            4 => Some(Tab::Policy),
             _ => None,
         }
     }
@@ -60,6 +71,7 @@ pub struct App {
     pub events: EventsState,
     pub stats: StatsState,
     pub live: LiveState,
+    pub policy: PolicyState,
     pub filter: FilterState,
 }
 
@@ -76,6 +88,7 @@ impl App {
             events: EventsState::new(),
             stats: StatsState::new(),
             live: LiveState::new(),
+            policy: PolicyState::new(),
             filter: FilterState::new(),
         }
     }
@@ -140,6 +153,9 @@ mod tests {
         app.next_tab();
         assert_eq!(app.active_tab, Tab::Live);
 
+        app.next_tab();
+        assert_eq!(app.active_tab, Tab::Policy);
+
         app.next_tab(); // wraps
         assert_eq!(app.active_tab, Tab::Sessions);
     }
@@ -149,11 +165,11 @@ mod tests {
         let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert_eq!(app.active_tab, Tab::Sessions);
 
-        app.prev_tab(); // wraps to Live
-        assert_eq!(app.active_tab, Tab::Live);
+        app.prev_tab(); // wraps to Policy
+        assert_eq!(app.active_tab, Tab::Policy);
 
         app.prev_tab();
-        assert_eq!(app.active_tab, Tab::Stats);
+        assert_eq!(app.active_tab, Tab::Live);
     }
 
     #[test]

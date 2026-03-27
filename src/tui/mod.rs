@@ -63,6 +63,9 @@ pub async fn run(
         if app.active_tab == Tab::Live && !app.live.initialized {
             let _ = app.live.initialize(pool).await;
         }
+        if app.active_tab == Tab::Policy && !app.policy.loaded {
+            let _ = app.policy.load(pool).await;
+        }
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
@@ -106,11 +109,19 @@ pub async fn run(
                         app.set_tab(Tab::Stats);
                     }
                     KeyCode::Char('4') => app.set_tab(Tab::Live),
+                    KeyCode::Char('5') => {
+                        app.policy.loaded = false; // refresh on switch
+                        app.set_tab(Tab::Policy);
+                    }
                     KeyCode::Tab
                         if app.active_tab == Tab::Events && app.events.expanded.is_some() =>
                     {
                         // Tab toggles detail mode when detail is expanded
                         app.events.toggle_detail_mode();
+                    }
+                    KeyCode::Tab if app.active_tab == Tab::Policy => {
+                        // Tab cycles pane within the Policy tab
+                        app.policy.next_pane();
                     }
                     KeyCode::Tab => app.next_tab(),
                     KeyCode::BackTab => app.prev_tab(),
@@ -120,6 +131,7 @@ pub async fn run(
                         Tab::Events => handle_events_key(&mut app, key.code),
                         Tab::Stats => handle_stats_key(&mut app, key.code),
                         Tab::Live => handle_live_key(&mut app, key.code),
+                        Tab::Policy => handle_policy_key(&mut app, key.code),
                     },
                 }
             }
@@ -206,6 +218,17 @@ fn handle_live_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.live.scroll_up(),
         KeyCode::Down | KeyCode::Char('j') => app.live.scroll_down(),
         KeyCode::Char('G') => app.live.scroll_to_bottom(),
+        _ => {}
+    }
+}
+
+/// Handle key events specific to the Policy tab.
+fn handle_policy_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Down | KeyCode::Char('j') => app.policy.next(),
+        KeyCode::Up | KeyCode::Char('k') => app.policy.prev(),
+        KeyCode::Char('g') => app.policy.top(),
+        KeyCode::Char('G') => app.policy.bottom(),
         _ => {}
     }
 }

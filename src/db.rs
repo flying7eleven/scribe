@@ -1047,6 +1047,52 @@ pub async fn get_classification(
     }))
 }
 
+// ── Recent enforcements for TUI (US-0038) ──
+
+/// A single enforcement row for display.
+#[derive(Debug)]
+#[allow(dead_code)] // id and session_id retained for future use (e.g. drill-down)
+pub struct EnforcementRow {
+    pub id: i64,
+    pub timestamp: String,
+    pub session_id: String,
+    pub tool_name: String,
+    pub tool_input: Option<String>,
+    pub action: String,
+    pub reason: Option<String>,
+    pub rule_id: Option<i64>,
+}
+
+/// Fetch recent enforcements ordered by timestamp descending.
+pub async fn recent_enforcements(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<EnforcementRow>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query(
+        "SELECT id, timestamp, session_id, tool_name, tool_input, action, reason, rule_id \
+         FROM enforcements ORDER BY timestamp DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let results = rows
+        .iter()
+        .map(|row| EnforcementRow {
+            id: row.get("id"),
+            timestamp: row.get("timestamp"),
+            session_id: row.get("session_id"),
+            tool_name: row.get("tool_name"),
+            tool_input: row.get("tool_input"),
+            action: row.get("action"),
+            reason: row.get("reason"),
+            rule_id: row.get("rule_id"),
+        })
+        .collect();
+
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

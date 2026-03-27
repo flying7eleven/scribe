@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::filter::{filter_events, filter_sessions};
 use super::tabs::events::{self, DetailMode};
+use super::tabs::policy::PolicyPane;
 use crate::format::{
     format_count, format_date_label, format_duration, format_size, format_timestamp, histogram_bar,
     truncate_path,
@@ -56,6 +57,7 @@ fn draw_tab_content(frame: &mut Frame, app: &App, area: Rect) {
         Tab::Events => draw_events_tab(frame, app, area),
         Tab::Stats => draw_stats_tab(frame, app, area),
         Tab::Live => draw_live_tab(frame, app, area),
+        Tab::Policy => draw_policy_tab(frame, app, area),
     }
 }
 
@@ -581,4 +583,280 @@ fn draw_live_tab(frame: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(format!(" {} events in feed{pause_hint}", live.feed_len()))
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, chunks[2]);
+}
+
+/// Draw the Policy tab with classification summary, enforcements, and rules.
+fn draw_policy_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let policy = &app.policy;
+
+    if !policy.loaded {
+        let loading = Paragraph::new("Loading...")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title(" Policy "));
+        frame.render_widget(loading, area);
+        return;
+    }
+
+    // Three vertical panes: classification summary (3), enforcements (~50%), rules (~40%), status (1)
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Percentage(50),
+        Constraint::Percentage(40),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    // Top pane: Classification summary
+    draw_classification_summary(frame, policy, chunks[0]);
+
+    // Middle pane: Enforcements
+    draw_enforcements_pane(frame, policy, chunks[1]);
+
+    // Bottom pane: Rules
+    draw_rules_pane(frame, policy, chunks[2]);
+
+    // Status line
+    let status = Paragraph::new(format!(
+        " {} enforcement{} | {} rule{} | Tab cycle pane | j/k navigate",
+        policy.enforcements.len(),
+        if policy.enforcements.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        policy.rules.len(),
+        if policy.rules.len() == 1 { "" } else { "s" },
+    ))
+    .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, chunks[3]);
+}
+
+/// Draw the classification summary bar.
+fn draw_classification_summary(
+    frame: &mut Frame,
+    policy: &super::tabs::policy::PolicyState,
+    area: Rect,
+) {
+    let mut safe_count: i64 = 0;
+    let mut risky_count: i64 = 0;
+    let mut dangerous_count: i64 = 0;
+    let mut unclassified_count: i64 = 0;
+
+    for c in &policy.classification_summary {
+        match c.risk_level.as_str() {
+            "safe" => safe_count = c.count,
+            "risky" => risky_count = c.count,
+            "dangerous" => dangerous_count = c.count,
+            _ => unclassified_count += c.count,
+        }
+    }
+
+    let summary_line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("safe: ", Style::default().fg(Color::Green)),
+        Span::raw(format_count(safe_count)),
+        Span::raw("  "),
+        Span::styled("risky: ", Style::default().fg(Color::Yellow)),
+        Span::raw(format_count(risky_count)),
+        Span::raw("  "),
+        Span::styled("dangerous: ", Style::default().fg(Color::Red)),
+        Span::raw(format_count(dangerous_count)),
+        Span::raw("  "),
+        Span::styled("unclassified: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format_count(unclassified_count)),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Classifications ");
+    let para = Paragraph::new(summary_line).block(block);
+    frame.render_widget(para, area);
+}
+
+/// Draw the enforcements pane.
+fn draw_enforcements_pane(
+    frame: &mut Frame,
+    policy: &super::tabs::policy::PolicyState,
+    area: Rect,
+) {
+    let is_active = policy.active_pane == PolicyPane::Enforcements;
+    let border_style = if is_active {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    if policy.enforcements.is_empty() {
+        let empty = Paragraph::new("(no enforcements)")
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(" Enforcements "),
+            );
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Timestamp"),
+        Cell::from("Action"),
+        Cell::from("Tool"),
+        Cell::from("Input"),
+        Cell::from("Rule"),
+        Cell::from("Reason"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows: Vec<Row> = policy
+        .enforcements
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let action_style = if e.action == "denied" {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            let action_label = e.action.to_uppercase();
+            let input_display = e
+                .tool_input
+                .as_deref()
+                .map(|s| if s.len() > 30 { &s[..30] } else { s })
+                .unwrap_or("");
+            let rule_display = e.rule_id.map(|id| format!("#{id}")).unwrap_or_default();
+            let reason_display = e.reason.as_deref().unwrap_or("");
+
+            let row_style = if is_active && i == policy.enforcement_selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(format_timestamp(&e.timestamp)),
+                Cell::from(Span::styled(action_label, action_style)),
+                Cell::from(e.tool_name.clone()),
+                Cell::from(input_display.to_string()),
+                Cell::from(rule_display),
+                Cell::from(reason_display.to_string()),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(21),
+            Constraint::Length(9),
+            Constraint::Length(12),
+            Constraint::Min(15),
+            Constraint::Length(6),
+            Constraint::Min(15),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Enforcements "),
+    );
+
+    frame.render_widget(table, area);
+}
+
+/// Draw the rules pane.
+fn draw_rules_pane(frame: &mut Frame, policy: &super::tabs::policy::PolicyState, area: Rect) {
+    let is_active = policy.active_pane == PolicyPane::Rules;
+    let border_style = if is_active {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    if policy.rules.is_empty() {
+        let empty = Paragraph::new("(no rules)")
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(" Rules "),
+            );
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("ID"),
+        Cell::from("Pri"),
+        Cell::from("Action"),
+        Cell::from("Tool Pattern"),
+        Cell::from("Input Pattern"),
+        Cell::from("Reason"),
+        Cell::from("Enabled"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows: Vec<Row> = policy
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let row_style = if is_active && i == policy.rule_selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(r.id.to_string()),
+                Cell::from(r.priority.to_string()),
+                Cell::from(r.action.clone()),
+                Cell::from(r.tool_pattern.clone()),
+                Cell::from(r.input_pattern.clone().unwrap_or_default()),
+                Cell::from(r.reason.clone()),
+                Cell::from(if r.enabled { "yes" } else { "no" }),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(5),
+            Constraint::Length(7),
+            Constraint::Length(14),
+            Constraint::Min(14),
+            Constraint::Min(14),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Rules "),
+    );
+
+    frame.render_widget(table, area);
 }
