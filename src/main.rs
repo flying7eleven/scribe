@@ -1,3 +1,4 @@
+pub mod classify;
 mod cmd_completions;
 mod cmd_init;
 mod cmd_log;

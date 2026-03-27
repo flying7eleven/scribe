@@ -654,6 +654,73 @@ pub async fn daily_activity(
     Ok(results)
 }
 
+// ── Classification DB operations (E009) ──
+
+/// Count of classifications by risk level.
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by cmd_classify (US-0034)
+pub struct ClassificationCount {
+    pub risk_level: String,
+    pub count: i64,
+}
+
+/// Insert a classification result.
+#[allow(dead_code)] // consumed by cmd_classify (US-0034)
+pub async fn insert_classification(
+    pool: &SqlitePool,
+    event_id: Option<i64>,
+    classification: &crate::classify::Classification,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "INSERT INTO classifications (event_id, tool_name, input_pattern, risk_level, reason, heuristic) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(event_id)
+    .bind(&classification.tool_name)
+    .bind(&classification.input_pattern)
+    .bind(classification.risk_level.as_str())
+    .bind(&classification.reason)
+    .bind(&classification.heuristic)
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+/// Get classification counts by risk level, optionally filtered by time.
+#[allow(dead_code)] // consumed by cmd_classify (US-0034)
+pub async fn classification_summary(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<ClassificationCount>, Box<dyn std::error::Error>> {
+    let mut sql =
+        String::from("SELECT risk_level, COUNT(*) as count FROM classifications WHERE 1=1");
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(s) = since {
+        sql.push_str(" AND timestamp >= ?");
+        binds.push(s.to_string());
+    }
+
+    sql.push_str(" GROUP BY risk_level ORDER BY count DESC");
+
+    let mut query = sqlx::query(&sql);
+    for b in &binds {
+        query = query.bind(b);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results = rows
+        .iter()
+        .map(|row| ClassificationCount {
+            risk_level: row.get("risk_level"),
+            count: row.get("count"),
+        })
+        .collect();
+
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
