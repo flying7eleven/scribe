@@ -4,6 +4,7 @@ mod cmd_completions;
 mod cmd_guard;
 mod cmd_init;
 mod cmd_log;
+mod cmd_policy;
 mod cmd_query;
 mod cmd_retain;
 mod cmd_stats;
@@ -114,6 +115,11 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Manage policy enforcement rules
+    Policy {
+        #[command(subcommand)]
+        command: cmd_policy::PolicyCommand,
     },
     /// Evaluate tool call against policy rules (PreToolUse hook)
     Guard,
@@ -329,6 +335,12 @@ async fn main() {
         Commands::Stats { since, json } => {
             if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref(), json).await {
                 eprintln!("scribe: stats error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Policy { command } => {
+            if let Err(e) = cmd_policy::run(&pool, command).await {
+                eprintln!("scribe: policy error: {e}");
                 std::process::exit(1);
             }
         }

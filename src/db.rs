@@ -800,6 +800,253 @@ pub async fn insert_enforcement(
     Ok(result.last_insert_rowid())
 }
 
+// ── Policy CLI DB operations (US-0037) ──
+
+/// A full rule row including metadata fields.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct FullRuleRow {
+    pub id: i64,
+    pub tool_pattern: String,
+    pub input_pattern: Option<String>,
+    pub action: String,
+    pub reason: String,
+    pub priority: i64,
+    pub enabled: bool,
+    pub source: String,
+    pub created_at: String,
+}
+
+/// A classification row for the promote subcommand.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ClassificationRow {
+    pub id: i64,
+    pub tool_name: String,
+    pub input_pattern: String,
+    pub risk_level: String,
+    pub reason: String,
+    pub heuristic: String,
+}
+
+/// Enforcement statistics.
+#[derive(Debug)]
+pub struct EnforcementStats {
+    pub total: i64,
+    pub allowed: i64,
+    pub denied: i64,
+    pub top_denied: Vec<TopDeniedRule>,
+}
+
+/// A top denied rule entry for stats display.
+#[derive(Debug)]
+pub struct TopDeniedRule {
+    pub rule_id: i64,
+    pub reason: String,
+    pub count: i64,
+}
+
+/// Insert a new policy rule.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_rule(
+    pool: &SqlitePool,
+    tool_pattern: &str,
+    input_pattern: Option<&str>,
+    action: &str,
+    reason: &str,
+    priority: i64,
+    source: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "INSERT INTO rules (tool_pattern, input_pattern, action, reason, priority, source) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(tool_pattern)
+    .bind(input_pattern)
+    .bind(action)
+    .bind(reason)
+    .bind(priority)
+    .bind(source)
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+/// Delete a rule by ID. Returns true if a row was deleted.
+pub async fn delete_rule(pool: &SqlitePool, id: i64) -> Result<bool, Box<dyn std::error::Error>> {
+    let result = sqlx::query("DELETE FROM rules WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Update the enabled status of a rule. Returns true if a row was updated.
+pub async fn update_rule_enabled(
+    pool: &SqlitePool,
+    id: i64,
+    enabled: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "UPDATE rules SET enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    )
+    .bind(enabled)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// List rules, optionally including disabled ones.
+pub async fn list_rules(
+    pool: &SqlitePool,
+    include_disabled: bool,
+) -> Result<Vec<FullRuleRow>, Box<dyn std::error::Error>> {
+    let sql = if include_disabled {
+        "SELECT id, tool_pattern, input_pattern, action, reason, priority, enabled, source, created_at \
+         FROM rules ORDER BY priority DESC, id DESC"
+    } else {
+        "SELECT id, tool_pattern, input_pattern, action, reason, priority, enabled, source, created_at \
+         FROM rules WHERE enabled = 1 ORDER BY priority DESC, id DESC"
+    };
+
+    let rows = sqlx::query(sql).fetch_all(pool).await?;
+
+    let results = rows
+        .iter()
+        .map(|row| {
+            let enabled_int: i64 = row.get("enabled");
+            FullRuleRow {
+                id: row.get("id"),
+                tool_pattern: row.get("tool_pattern"),
+                input_pattern: row.get("input_pattern"),
+                action: row.get("action"),
+                reason: row.get("reason"),
+                priority: row.get("priority"),
+                enabled: enabled_int != 0,
+                source: row.get("source"),
+                created_at: row.get("created_at"),
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Delete all rules. Returns the count deleted.
+pub async fn delete_all_rules(pool: &SqlitePool) -> Result<u64, Box<dyn std::error::Error>> {
+    let result = sqlx::query("DELETE FROM rules").execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+/// Get enforcement statistics, optionally filtered by time.
+pub async fn enforcement_stats(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<EnforcementStats, Box<dyn std::error::Error>> {
+    // Total count
+    let (total_sql, allowed_sql, denied_sql) = if since.is_some() {
+        (
+            "SELECT COUNT(*) as cnt FROM enforcements WHERE timestamp >= ?",
+            "SELECT COUNT(*) as cnt FROM enforcements WHERE action = 'allowed' AND timestamp >= ?",
+            "SELECT COUNT(*) as cnt FROM enforcements WHERE action = 'denied' AND timestamp >= ?",
+        )
+    } else {
+        (
+            "SELECT COUNT(*) as cnt FROM enforcements",
+            "SELECT COUNT(*) as cnt FROM enforcements WHERE action = 'allowed'",
+            "SELECT COUNT(*) as cnt FROM enforcements WHERE action = 'denied'",
+        )
+    };
+
+    let total: i64 = if let Some(s) = since {
+        let row = sqlx::query(total_sql).bind(s).fetch_one(pool).await?;
+        row.get("cnt")
+    } else {
+        let row = sqlx::query(total_sql).fetch_one(pool).await?;
+        row.get("cnt")
+    };
+
+    let allowed: i64 = if let Some(s) = since {
+        let row = sqlx::query(allowed_sql).bind(s).fetch_one(pool).await?;
+        row.get("cnt")
+    } else {
+        let row = sqlx::query(allowed_sql).fetch_one(pool).await?;
+        row.get("cnt")
+    };
+
+    let denied: i64 = if let Some(s) = since {
+        let row = sqlx::query(denied_sql).bind(s).fetch_one(pool).await?;
+        row.get("cnt")
+    } else {
+        let row = sqlx::query(denied_sql).fetch_one(pool).await?;
+        row.get("cnt")
+    };
+
+    // Top denied rules
+    let top_sql = if since.is_some() {
+        "SELECT e.rule_id, COALESCE(e.reason, '') as reason, COUNT(*) as cnt \
+         FROM enforcements e \
+         WHERE e.action = 'denied' AND e.timestamp >= ? AND e.rule_id IS NOT NULL \
+         GROUP BY e.rule_id \
+         ORDER BY cnt DESC \
+         LIMIT 10"
+    } else {
+        "SELECT e.rule_id, COALESCE(e.reason, '') as reason, COUNT(*) as cnt \
+         FROM enforcements e \
+         WHERE e.action = 'denied' AND e.rule_id IS NOT NULL \
+         GROUP BY e.rule_id \
+         ORDER BY cnt DESC \
+         LIMIT 10"
+    };
+
+    let top_rows = if let Some(s) = since {
+        sqlx::query(top_sql).bind(s).fetch_all(pool).await?
+    } else {
+        sqlx::query(top_sql).fetch_all(pool).await?
+    };
+
+    let top_denied = top_rows
+        .iter()
+        .map(|row| TopDeniedRule {
+            rule_id: row.get("rule_id"),
+            reason: row.get("reason"),
+            count: row.get("cnt"),
+        })
+        .collect();
+
+    Ok(EnforcementStats {
+        total,
+        allowed,
+        denied,
+        top_denied,
+    })
+}
+
+/// Get a classification by ID (for the promote subcommand).
+pub async fn get_classification(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<ClassificationRow>, Box<dyn std::error::Error>> {
+    let row = sqlx::query(
+        "SELECT id, tool_name, input_pattern, risk_level, reason, heuristic \
+         FROM classifications WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| ClassificationRow {
+        id: r.get("id"),
+        tool_name: r.get("tool_name"),
+        input_pattern: r.get("input_pattern"),
+        risk_level: r.get("risk_level"),
+        reason: r.get("reason"),
+        heuristic: r.get("heuristic"),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
