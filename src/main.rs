@@ -77,6 +77,9 @@ enum Commands {
         /// Write to ~/.claude/settings.json (global)
         #[arg(long, conflicts_with = "project")]
         global: bool,
+        /// Include scribe guard on PreToolUse for policy enforcement
+        #[arg(long)]
+        with_guard: bool,
     },
     /// Delete events older than the given duration
     Retain {
@@ -165,7 +168,11 @@ async fn main() {
 
     // Commands that don't need a database connection
     match cli.command {
-        Commands::Init { project, global } => {
+        Commands::Init {
+            project,
+            global,
+            with_guard,
+        } => {
             let target = if project {
                 cmd_init::OutputTarget::Project
             } else if global {
@@ -173,7 +180,7 @@ async fn main() {
             } else {
                 cmd_init::OutputTarget::Stdout
             };
-            if let Err(e) = cmd_init::run(target, None) {
+            if let Err(e) = cmd_init::run(target, None, with_guard) {
                 eprintln!("scribe: init error: {e}");
                 std::process::exit(1);
             }

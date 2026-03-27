@@ -36,24 +36,38 @@ pub enum OutputTarget {
 }
 
 /// Generate the complete hooks configuration as a serde_json::Value.
-pub fn generate_hooks_config() -> Value {
+/// When `with_guard` is true, PreToolUse gets `scribe guard` before `scribe log`.
+pub fn generate_hooks_config(with_guard: bool) -> Value {
     let mut hooks = serde_json::Map::new();
 
+    let log_hook = json!({
+        "type": "command",
+        "command": "scribe log",
+        "timeout": 10
+    });
+
+    let guard_hook = json!({
+        "type": "command",
+        "command": "scribe guard",
+        "timeout": 10
+    });
+
     for &(event, has_matcher) in HOOK_EVENTS {
-        let hook_obj = json!({
-            "type": "command",
-            "command": "scribe log",
-            "timeout": 10
-        });
+        // PreToolUse gets guard + log when --with-guard is set
+        let hook_array = if with_guard && event == "PreToolUse" {
+            json!([guard_hook.clone(), log_hook.clone()])
+        } else {
+            json!([log_hook.clone()])
+        };
 
         let entry = if has_matcher {
             json!({
                 "matcher": "*",
-                "hooks": [hook_obj]
+                "hooks": hook_array
             })
         } else {
             json!({
-                "hooks": [hook_obj]
+                "hooks": hook_array
             })
         };
 
@@ -69,8 +83,9 @@ pub fn generate_hooks_config() -> Value {
 pub fn run(
     target: OutputTarget,
     home_override: Option<PathBuf>,
+    with_guard: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = generate_hooks_config();
+    let config = generate_hooks_config(with_guard);
 
     match target {
         OutputTarget::Stdout => {
@@ -178,28 +193,28 @@ mod tests {
 
     #[test]
     fn test_generates_valid_json() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let json_str = serde_json::to_string_pretty(&config).unwrap();
         let _: Value = serde_json::from_str(&json_str).unwrap();
     }
 
     #[test]
     fn test_all_21_events_present() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
         assert_eq!(hooks.len(), 21);
     }
 
     #[test]
     fn test_no_worktree_create() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
         assert!(!hooks.contains_key("WorktreeCreate"));
     }
 
     #[test]
     fn test_matcher_events_have_matcher() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
 
         let with_matcher = [
@@ -235,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_non_matcher_events_omit_matcher() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
 
         let without_matcher = [
@@ -258,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_hook_command_and_timeout() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
 
         for (event, _) in HOOK_EVENTS {
@@ -276,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_canonical_event_order() {
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
         let keys: Vec<&String> = hooks.keys().collect();
 
@@ -295,7 +310,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub").join("settings.json");
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
 
         assert!(path.exists());
@@ -312,7 +327,7 @@ mod tests {
         // Write existing file with non-hooks keys
         std::fs::write(&path, r#"{"permissions":{"allow":["Bash"]},"hooks":{}}"#).unwrap();
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
 
         let content: Value =
@@ -335,7 +350,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
 
         let content: Value =
@@ -360,7 +375,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
 
         let content: Value =
@@ -393,7 +408,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
 
         let content: Value =
@@ -417,7 +432,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         merge_and_write(&path, &config).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
 
@@ -437,7 +452,7 @@ mod tests {
 
         std::fs::write(&path, "not json {{{").unwrap();
 
-        let config = generate_hooks_config();
+        let config = generate_hooks_config(false);
         let result = merge_and_write(&path, &config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid JSON"));
@@ -449,7 +464,7 @@ mod tests {
     #[test]
     fn test_run_global_with_home_override() {
         let dir = tempfile::tempdir().unwrap();
-        run(OutputTarget::Global, Some(dir.path().to_path_buf())).unwrap();
+        run(OutputTarget::Global, Some(dir.path().to_path_buf()), false).unwrap();
 
         let path = dir.path().join(".claude").join("settings.json");
         assert!(path.exists());
@@ -457,5 +472,50 @@ mod tests {
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(content["hooks"].as_object().unwrap().len(), 21);
+    }
+
+    // ── Guard registration tests (US-0036) ──
+
+    #[test]
+    fn test_with_guard_adds_guard_to_pretooluse() {
+        let config = generate_hooks_config(true);
+        let pre = &config["hooks"]["PreToolUse"][0]["hooks"];
+        let hooks = pre.as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0]["command"], "scribe guard");
+        assert_eq!(hooks[1]["command"], "scribe log");
+    }
+
+    #[test]
+    fn test_with_guard_only_on_pretooluse() {
+        let config = generate_hooks_config(true);
+        // PostToolUse should still only have log
+        let post = &config["hooks"]["PostToolUse"][0]["hooks"];
+        let hooks = post.as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "scribe log");
+
+        // SessionStart should still only have log
+        let session = &config["hooks"]["SessionStart"][0]["hooks"];
+        let s_hooks = session.as_array().unwrap();
+        assert_eq!(s_hooks.len(), 1);
+        assert_eq!(s_hooks[0]["command"], "scribe log");
+    }
+
+    #[test]
+    fn test_without_guard_unchanged() {
+        let with = generate_hooks_config(false);
+        // PreToolUse should have only log
+        let pre = &with["hooks"]["PreToolUse"][0]["hooks"];
+        let hooks = pre.as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "scribe log");
+    }
+
+    #[test]
+    fn test_guard_has_correct_timeout() {
+        let config = generate_hooks_config(true);
+        let guard = &config["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(guard["timeout"], 10);
     }
 }
