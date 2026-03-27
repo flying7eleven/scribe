@@ -658,14 +658,25 @@ pub async fn daily_activity(
 
 /// Count of classifications by risk level.
 #[derive(Debug)]
-#[allow(dead_code)] // consumed by cmd_classify (US-0034)
 pub struct ClassificationCount {
     pub risk_level: String,
     pub count: i64,
 }
 
+/// Check if an event already has a classification.
+pub async fn has_classification_for_event(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let row = sqlx::query("SELECT COUNT(*) as cnt FROM classifications WHERE event_id = ?")
+        .bind(event_id)
+        .fetch_one(pool)
+        .await?;
+    let count: i64 = row.get("cnt");
+    Ok(count > 0)
+}
+
 /// Insert a classification result.
-#[allow(dead_code)] // consumed by cmd_classify (US-0034)
 pub async fn insert_classification(
     pool: &SqlitePool,
     event_id: Option<i64>,
@@ -688,7 +699,6 @@ pub async fn insert_classification(
 }
 
 /// Get classification counts by risk level, optionally filtered by time.
-#[allow(dead_code)] // consumed by cmd_classify (US-0034)
 pub async fn classification_summary(
     pool: &SqlitePool,
     since: Option<&str>,

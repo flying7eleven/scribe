@@ -1,4 +1,5 @@
 pub mod classify;
+mod cmd_classify;
 mod cmd_completions;
 mod cmd_init;
 mod cmd_log;
@@ -94,6 +95,21 @@ enum Commands {
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: clap_complete::Shell,
+    },
+    /// Classify historical tool calls by risk level
+    Classify {
+        /// Only classify events after this time (duration or date)
+        #[arg(long)]
+        since: Option<String>,
+        /// Show per-event classification details
+        #[arg(long)]
+        details: bool,
+        /// Filter by risk level: safe, risky, dangerous
+        #[arg(long)]
+        risk: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Launch interactive terminal user interface
     Tui {
@@ -280,6 +296,17 @@ async fn main() {
         Commands::Retain { duration } => {
             if let Err(e) = cmd_retain::run(&pool, &duration).await {
                 eprintln!("scribe: retain error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Classify {
+            since,
+            details,
+            risk,
+            json,
+        } => {
+            if let Err(e) = cmd_classify::run(&pool, since, details, risk, json).await {
+                eprintln!("scribe: classify error: {e}");
                 std::process::exit(1);
             }
         }
