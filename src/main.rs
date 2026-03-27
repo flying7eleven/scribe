@@ -1,6 +1,7 @@
 pub mod classify;
 mod cmd_classify;
 mod cmd_completions;
+mod cmd_guard;
 mod cmd_init;
 mod cmd_log;
 mod cmd_query;
@@ -111,6 +112,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate tool call against policy rules (PreToolUse hook)
+    Guard,
     /// Launch interactive terminal user interface
     Tui {
         /// Polling interval in ms for the Live tab (default: 1000)
@@ -143,7 +146,7 @@ enum QuerySub {
 
 /// Returns true for subcommands that are user-interactive (not the `log` hot path).
 fn is_interactive_command(cmd: &Commands) -> bool {
-    !matches!(cmd, Commands::Log)
+    !matches!(cmd, Commands::Log | Commands::Guard)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -212,6 +215,12 @@ async fn main() {
             });
             if let Err(e) = cmd_log::run(&pool, retention.as_ref()).await {
                 eprintln!("scribe: log error: {e}");
+            }
+        }
+        Commands::Guard => {
+            let exit_code = cmd_guard::run(&pool).await;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
         }
         Commands::Query {

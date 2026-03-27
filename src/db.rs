@@ -731,6 +731,75 @@ pub async fn classification_summary(
     Ok(results)
 }
 
+// ── Rules & enforcement DB operations (E009) ──
+
+/// A rule row from the rules table.
+#[derive(Debug)]
+#[allow(dead_code)] // priority used for ordering in DB query, accessed in policy CLI (US-0037)
+pub struct RuleRow {
+    pub id: i64,
+    pub tool_pattern: String,
+    pub input_pattern: Option<String>,
+    pub action: String,
+    pub reason: String,
+    pub priority: i64,
+}
+
+/// Load all enabled rules, ordered by priority DESC, id DESC.
+pub async fn load_enabled_rules(
+    pool: &SqlitePool,
+) -> Result<Vec<RuleRow>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query(
+        "SELECT id, tool_pattern, input_pattern, action, reason, priority \
+         FROM rules WHERE enabled = 1 ORDER BY priority DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let results = rows
+        .iter()
+        .map(|row| RuleRow {
+            id: row.get("id"),
+            tool_pattern: row.get("tool_pattern"),
+            input_pattern: row.get("input_pattern"),
+            action: row.get("action"),
+            reason: row.get("reason"),
+            priority: row.get("priority"),
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Insert an enforcement record.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_enforcement(
+    pool: &SqlitePool,
+    session_id: &str,
+    tool_name: &str,
+    tool_input: Option<&str>,
+    rule_id: Option<i64>,
+    action: &str,
+    reason: Option<&str>,
+    evaluation_ms: f64,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "INSERT INTO enforcements (session_id, tool_name, tool_input, rule_id, action, reason, evaluation_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(session_id)
+    .bind(tool_name)
+    .bind(tool_input)
+    .bind(rule_id)
+    .bind(action)
+    .bind(reason)
+    .bind(evaluation_ms)
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
