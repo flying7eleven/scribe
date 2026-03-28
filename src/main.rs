@@ -1,4 +1,5 @@
 pub mod classify;
+mod cmd_backfill;
 mod cmd_classify;
 mod cmd_completions;
 mod cmd_guard;
@@ -123,6 +124,15 @@ enum Commands {
     },
     /// Evaluate tool call against policy rules (PreToolUse hook)
     Guard,
+    /// Backfill detail tables from existing event raw_payload data
+    Backfill {
+        /// Show what would be backfilled without modifying the database
+        #[arg(long)]
+        dry_run: bool,
+        /// Number of events per transaction batch
+        #[arg(long, default_value = "1000")]
+        batch_size: usize,
+    },
     /// Launch interactive terminal user interface
     Tui {
         /// Polling interval in ms for the Live tab (default: 1000)
@@ -341,6 +351,15 @@ async fn main() {
         Commands::Policy { command } => {
             if let Err(e) = cmd_policy::run(&pool, command).await {
                 eprintln!("scribe: policy error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Backfill {
+            dry_run,
+            batch_size,
+        } => {
+            if let Err(e) = cmd_backfill::run(&pool, dry_run, batch_size).await {
+                eprintln!("scribe: backfill error: {e}");
                 std::process::exit(1);
             }
         }
