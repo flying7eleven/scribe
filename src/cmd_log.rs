@@ -67,31 +67,8 @@ pub async fn process_payload(
         }
     };
 
-    // Serialize Value fields to JSON strings for DB storage
-    let tool_input_str = input
-        .tool_input
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
-    let tool_response_str = input
-        .tool_response
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
-
-    // Insert into DB
-    db::insert_event(
-        pool,
-        &input.session_id,
-        &input.hook_event_name, // hook_event_name → event_type
-        input.tool_name.as_deref(),
-        tool_input_str.as_deref(),
-        tool_response_str.as_deref(),
-        &input.cwd,
-        input.permission_mode.as_deref(),
-        raw, // original stdin string as raw_payload
-    )
-    .await?;
+    // Insert into DB (insert_event now accepts &HookInput directly)
+    db::insert_event(pool, &input, raw).await?;
 
     // Auto-retention: if configured, maybe clean up expired events
     if let Some(ret) = retention {

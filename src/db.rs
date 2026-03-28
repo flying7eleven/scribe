@@ -129,39 +129,52 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, Box<dyn std::error::Er
     Ok(pool)
 }
 
-/// Insert an event into `events` and upsert `sessions` in a single transaction.
-#[allow(clippy::too_many_arguments)]
+/// Insert an event into `events`, upsert `sessions`, and populate the
+/// appropriate Tier 1 detail table — all in a single transaction.
+///
+/// Returns the new event's row ID.
 pub async fn insert_event(
     pool: &SqlitePool,
-    session_id: &str,
-    event_type: &str,
-    tool_name: Option<&str>,
-    tool_input: Option<&str>,
-    tool_response: Option<&str>,
-    cwd: &str,
-    permission_mode: Option<&str>,
+    hook_input: &crate::models::HookInput,
     raw_payload: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<i64, Box<dyn std::error::Error>> {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
 
+    let tool_input_str = hook_input
+        .tool_input
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let tool_response_str = hook_input
+        .tool_response
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let session_id = &hook_input.session_id;
+    let event_type = &hook_input.hook_event_name;
+    let cwd = &hook_input.cwd;
+
     let mut tx = pool.begin().await?;
 
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO events (session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(session_id)
     .bind(event_type)
-    .bind(tool_name)
-    .bind(tool_input)
-    .bind(tool_response)
+    .bind(hook_input.tool_name.as_deref())
+    .bind(tool_input_str.as_deref())
+    .bind(tool_response_str.as_deref())
     .bind(cwd)
-    .bind(permission_mode)
+    .bind(hook_input.permission_mode.as_deref())
     .bind(raw_payload)
     .execute(&mut *tx)
     .await?;
+
+    let event_id = result.last_insert_rowid();
 
     sqlx::query(
         "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count)
@@ -178,8 +191,80 @@ pub async fn insert_event(
     .execute(&mut *tx)
     .await?;
 
+    // Tier 1 detail inserts
+    match event_type.as_str() {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+            let ps = hook_input
+                .permission_suggestions
+                .as_ref()
+                .map(|v| v.to_string());
+            sqlx::query(
+                "INSERT INTO tool_event_details (event_id, tool_use_id, error, error_details, is_interrupt, permission_suggestions) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.tool_use_id.as_deref())
+            .bind(hook_input.error.as_deref())
+            .bind(hook_input.error_details.as_deref())
+            .bind(hook_input.is_interrupt)
+            .bind(ps.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "Stop" | "StopFailure" | "SubagentStop" => {
+            sqlx::query(
+                "INSERT INTO stop_event_details (event_id, stop_hook_active, last_assistant_message, error, error_details) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.stop_hook_active)
+            .bind(hook_input.last_assistant_message.as_deref())
+            .bind(hook_input.error.as_deref())
+            .bind(hook_input.error_details.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "SessionStart" | "SessionEnd" | "ConfigChange" => {
+            sqlx::query(
+                "INSERT INTO session_event_details (event_id, source, model, reason, file_path) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.source.as_deref())
+            .bind(hook_input.model.as_deref())
+            .bind(hook_input.reason.as_deref())
+            .bind(hook_input.file_path.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        _ => {} // Tier 2/3 handled in US-0041
+    }
+
     tx.commit().await?;
-    Ok(())
+    Ok(event_id)
+}
+
+/// Test helper: construct a minimal `HookInput` from individual fields and insert.
+#[cfg(test)]
+pub async fn insert_test_event(
+    pool: &SqlitePool,
+    session_id: &str,
+    event_type: &str,
+    tool_name: Option<&str>,
+    tool_input: Option<&str>,
+    tool_response: Option<&str>,
+    cwd: &str,
+    permission_mode: Option<&str>,
+    raw_payload: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let hook = crate::models::HookInput {
+        session_id: session_id.to_string(),
+        hook_event_name: event_type.to_string(),
+        cwd: cwd.to_string(),
+        tool_name: tool_name.map(String::from),
+        tool_input: tool_input.and_then(|s| serde_json::from_str(s).ok()),
+        tool_response: tool_response.and_then(|s| serde_json::from_str(s).ok()),
+        permission_mode: permission_mode.map(String::from),
+        ..Default::default()
+    };
+    insert_event(pool, &hook, raw_payload).await
 }
 
 /// Query events with dynamic filters, ordered by timestamp descending.
@@ -1236,7 +1321,7 @@ mod tests {
         let db_path = dir.path().join("roundtrip.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
-        insert_event(
+        insert_test_event(
             &pool,
             "sess-1",
             "PreToolUse",
@@ -1270,7 +1355,7 @@ mod tests {
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
         // First event
-        insert_event(
+        insert_test_event(
             &pool,
             "sess-1",
             "SessionStart",
@@ -1285,7 +1370,7 @@ mod tests {
         .unwrap();
 
         // Second event with different cwd
-        insert_event(
+        insert_test_event(
             &pool,
             "sess-1",
             "PreToolUse",
@@ -1325,7 +1410,7 @@ mod tests {
         let db_path = dir.path().join("multi_session.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
-        insert_event(
+        insert_test_event(
             &pool,
             "sess-a",
             "SessionStart",
@@ -1338,7 +1423,7 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_event(
+        insert_test_event(
             &pool,
             "sess-b",
             "SessionStart",
@@ -1368,7 +1453,7 @@ mod tests {
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
         for i in 0..5 {
-            insert_event(
+            insert_test_event(
                 &pool,
                 "sess-1",
                 &format!("Event{i}"),
@@ -2088,5 +2173,344 @@ mod tests {
         let stats = get_stats(&pool, None).await.unwrap();
         assert_eq!(stats.event_count, 11);
         assert_eq!(stats.session_count, 2);
+    }
+
+    // ── Tier 1 detail table tests ──
+
+    async fn setup_detail_db() -> (SqlitePool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("detail.db");
+        let pool = connect(db_path.to_str().unwrap()).await.unwrap();
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn test_detail_pre_tool_use_tool_use_id() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PreToolUse".into(),
+            cwd: "/tmp".into(),
+            tool_name: Some("Bash".into()),
+            tool_use_id: Some("tu-123".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query("SELECT tool_use_id FROM tool_event_details WHERE event_id = ?")
+            .bind(eid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("tool_use_id").as_deref(),
+            Some("tu-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_post_tool_use_failure_error_fields() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PostToolUseFailure".into(),
+            cwd: "/tmp".into(),
+            tool_name: Some("Bash".into()),
+            error: Some("timeout".into()),
+            error_details: Some("command timed out after 30s".into()),
+            is_interrupt: Some(true),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT error, error_details, is_interrupt FROM tool_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("error").as_deref(),
+            Some("timeout")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("error_details").as_deref(),
+            Some("command timed out after 30s")
+        );
+        assert_eq!(row.get::<Option<bool>, _>("is_interrupt"), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_detail_permission_request_suggestions() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PermissionRequest".into(),
+            cwd: "/tmp".into(),
+            tool_name: Some("Bash".into()),
+            permission_suggestions: Some(serde_json::json!({"allow": true})),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row =
+            sqlx::query("SELECT permission_suggestions FROM tool_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let ps: Option<String> = row.get("permission_suggestions");
+        assert!(ps.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(ps.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["allow"], true);
+    }
+
+    #[tokio::test]
+    async fn test_detail_stop_failure() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "StopFailure".into(),
+            cwd: "/tmp".into(),
+            error: Some("rate_limit".into()),
+            error_details: Some("too many requests".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row =
+            sqlx::query("SELECT error, error_details FROM stop_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("error").as_deref(),
+            Some("rate_limit")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("error_details").as_deref(),
+            Some("too many requests")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_stop_event() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "Stop".into(),
+            cwd: "/tmp".into(),
+            stop_hook_active: Some(false),
+            last_assistant_message: Some("done".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT stop_hook_active, last_assistant_message FROM stop_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<Option<bool>, _>("stop_hook_active"), Some(false));
+        assert_eq!(
+            row.get::<Option<String>, _>("last_assistant_message")
+                .as_deref(),
+            Some("done")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_subagent_stop() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SubagentStop".into(),
+            cwd: "/tmp".into(),
+            stop_hook_active: Some(true),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query("SELECT stop_hook_active FROM stop_event_details WHERE event_id = ?")
+            .bind(eid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<Option<bool>, _>("stop_hook_active"), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_detail_session_start() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SessionStart".into(),
+            cwd: "/tmp".into(),
+            source: Some("startup".into()),
+            model: Some("claude-sonnet-4-5-20250514".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query("SELECT source, model FROM session_event_details WHERE event_id = ?")
+            .bind(eid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("source").as_deref(),
+            Some("startup")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("model").as_deref(),
+            Some("claude-sonnet-4-5-20250514")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_session_end() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SessionEnd".into(),
+            cwd: "/tmp".into(),
+            reason: Some("clear".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query("SELECT reason FROM session_event_details WHERE event_id = ?")
+            .bind(eid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("reason").as_deref(),
+            Some("clear")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_config_change() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "ConfigChange".into(),
+            cwd: "/tmp".into(),
+            source: Some("user_settings".into()),
+            model: Some("claude-opus-4-20250514".into()),
+            file_path: Some("/home/.claude/settings.json".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT source, model, file_path FROM session_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("source").as_deref(),
+            Some("user_settings")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("model").as_deref(),
+            Some("claude-opus-4-20250514")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("file_path").as_deref(),
+            Some("/home/.claude/settings.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_unknown_event_no_detail_row() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "Notification".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        // No row in any Tier 1 detail table
+        let tool_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stop_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM stop_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tool_count, 0);
+        assert_eq!(stop_count, 0);
+        assert_eq!(session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_detail_round_trip_with_join() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PreToolUse".into(),
+            cwd: "/project".into(),
+            tool_name: Some("Bash".into()),
+            tool_use_id: Some("tu-abc".into()),
+            tool_input: Some(serde_json::json!({"command": "ls"})),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, r#"{"raw":true}"#).await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT e.event_type, e.tool_name, d.tool_use_id
+             FROM events e
+             JOIN tool_event_details d ON d.event_id = e.id
+             WHERE e.id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("event_type"), "PreToolUse");
+        assert_eq!(
+            row.get::<Option<String>, _>("tool_name").as_deref(),
+            Some("Bash")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("tool_use_id").as_deref(),
+            Some("tu-abc")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_event_returns_id() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PreToolUse".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        };
+        let id1 = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id2 = insert_event(&pool, &hook, "{}").await.unwrap();
+        assert!(id1 > 0);
+        assert!(id2 > id1);
     }
 }

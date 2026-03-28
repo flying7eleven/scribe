@@ -327,7 +327,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let pool = db::connect(db_path.to_str().unwrap()).await.unwrap();
 
-        db::insert_event(
+        db::insert_test_event(
             &pool,
             "s1",
             "PreToolUse",
@@ -340,7 +340,7 @@ mod tests {
         )
         .await
         .unwrap();
-        db::insert_event(
+        db::insert_test_event(
             &pool,
             "s2",
             "SessionStart",
