@@ -210,7 +210,7 @@ pub async fn insert_event(
             .execute(&mut *tx)
             .await?;
         }
-        "Stop" | "StopFailure" | "SubagentStop" => {
+        "Stop" | "StopFailure" => {
             sqlx::query(
                 "INSERT INTO stop_event_details (event_id, stop_hook_active, last_assistant_message, error, error_details) VALUES (?, ?, ?, ?, ?)",
             )
@@ -234,7 +234,121 @@ pub async fn insert_event(
             .execute(&mut *tx)
             .await?;
         }
-        _ => {} // Tier 2/3 handled in US-0041
+        // Tier 2
+        "SubagentStop" => {
+            // stop_event_details (same as Stop/StopFailure)
+            sqlx::query(
+                "INSERT INTO stop_event_details (event_id, stop_hook_active, last_assistant_message, error, error_details) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.stop_hook_active)
+            .bind(hook_input.last_assistant_message.as_deref())
+            .bind(hook_input.error.as_deref())
+            .bind(hook_input.error_details.as_deref())
+            .execute(&mut *tx)
+            .await?;
+            // agent_event_details (dual insert)
+            sqlx::query(
+                "INSERT INTO agent_event_details (event_id, agent_id, agent_type, agent_transcript_path) VALUES (?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.agent_id.as_deref())
+            .bind(hook_input.agent_type.as_deref())
+            .bind(hook_input.agent_transcript_path.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "SubagentStart" => {
+            sqlx::query(
+                "INSERT INTO agent_event_details (event_id, agent_id, agent_type, agent_transcript_path) VALUES (?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.agent_id.as_deref())
+            .bind(hook_input.agent_type.as_deref())
+            .bind(hook_input.agent_transcript_path.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "Notification" | "Elicitation" | "ElicitationResult" => {
+            let rs = hook_input.requested_schema.as_ref().map(|v| v.to_string());
+            let ct = hook_input.content.as_ref().map(|v| v.to_string());
+            sqlx::query(
+                "INSERT INTO notification_event_details (event_id, notification_type, title, message, elicitation_id, mcp_server_name, mode, url, requested_schema, action, content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.notification_type.as_deref())
+            .bind(hook_input.title.as_deref())
+            .bind(hook_input.message.as_deref())
+            .bind(hook_input.elicitation_id.as_deref())
+            .bind(hook_input.mcp_server_name.as_deref())
+            .bind(hook_input.mode.as_deref())
+            .bind(hook_input.url.as_deref())
+            .bind(rs.as_deref())
+            .bind(hook_input.action.as_deref())
+            .bind(ct.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "PreCompact" | "PostCompact" => {
+            sqlx::query(
+                "INSERT INTO compact_event_details (event_id, `trigger`, custom_instructions, compact_summary) VALUES (?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.trigger.as_deref())
+            .bind(hook_input.custom_instructions.as_deref())
+            .bind(hook_input.compact_summary.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Tier 3
+        "InstructionsLoaded" => {
+            let globs_str = hook_input
+                .globs
+                .as_ref()
+                .map(|g| serde_json::to_string(g).unwrap_or_default());
+            sqlx::query(
+                "INSERT INTO instruction_event_details (event_id, file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.file_path.as_deref())
+            .bind(hook_input.memory_type.as_deref())
+            .bind(hook_input.load_reason.as_deref())
+            .bind(globs_str.as_deref())
+            .bind(hook_input.trigger_file_path.as_deref())
+            .bind(hook_input.parent_file_path.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "TeammateIdle" | "TaskCompleted" => {
+            sqlx::query(
+                "INSERT INTO team_event_details (event_id, teammate_name, team_name, task_id, task_subject, task_description) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.teammate_name.as_deref())
+            .bind(hook_input.team_name.as_deref())
+            .bind(hook_input.task_id.as_deref())
+            .bind(hook_input.task_subject.as_deref())
+            .bind(hook_input.task_description.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        "UserPromptSubmit" => {
+            sqlx::query("INSERT INTO prompt_event_details (event_id, prompt) VALUES (?, ?)")
+                .bind(event_id)
+                .bind(hook_input.prompt.as_deref())
+                .execute(&mut *tx)
+                .await?;
+        }
+        "WorktreeRemove" => {
+            sqlx::query(
+                "INSERT INTO worktree_event_details (event_id, worktree_path) VALUES (?, ?)",
+            )
+            .bind(event_id)
+            .bind(hook_input.worktree_path.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        _ => {} // truly unknown events
     }
 
     tx.commit().await?;
@@ -2512,5 +2626,434 @@ mod tests {
         let id2 = insert_event(&pool, &hook, "{}").await.unwrap();
         assert!(id1 > 0);
         assert!(id2 > id1);
+    }
+
+    // ── Tier 2 / Tier 3 detail insert tests (US-0041) ──
+
+    #[tokio::test]
+    async fn test_detail_subagent_start() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SubagentStart".into(),
+            cwd: "/tmp".into(),
+            agent_id: Some("agent-123".into()),
+            agent_type: Some("Explore".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("agent_id").as_deref(),
+            Some("agent-123")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("agent_type").as_deref(),
+            Some("Explore")
+        );
+        assert!(row
+            .get::<Option<String>, _>("agent_transcript_path")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_detail_subagent_stop_dual_insert() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SubagentStop".into(),
+            cwd: "/tmp".into(),
+            agent_id: Some("agent-456".into()),
+            agent_type: Some("Code".into()),
+            agent_transcript_path: Some("/transcripts/a.json".into()),
+            stop_hook_active: Some(true),
+            last_assistant_message: Some("done".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        // Verify stop_event_details
+        let stop_row =
+            sqlx::query("SELECT stop_hook_active, last_assistant_message FROM stop_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stop_row.get::<Option<bool>, _>("stop_hook_active"),
+            Some(true)
+        );
+        assert_eq!(
+            stop_row
+                .get::<Option<String>, _>("last_assistant_message")
+                .as_deref(),
+            Some("done")
+        );
+
+        // Verify agent_event_details
+        let agent_row = sqlx::query(
+            "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            agent_row.get::<Option<String>, _>("agent_id").as_deref(),
+            Some("agent-456")
+        );
+        assert_eq!(
+            agent_row.get::<Option<String>, _>("agent_type").as_deref(),
+            Some("Code")
+        );
+        assert_eq!(
+            agent_row
+                .get::<Option<String>, _>("agent_transcript_path")
+                .as_deref(),
+            Some("/transcripts/a.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_notification() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "Notification".into(),
+            cwd: "/tmp".into(),
+            notification_type: Some("permission_prompt".into()),
+            title: Some("Alert".into()),
+            message: Some("Please confirm".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT notification_type, title, message FROM notification_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("notification_type").as_deref(),
+            Some("permission_prompt")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("title").as_deref(),
+            Some("Alert")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("message").as_deref(),
+            Some("Please confirm")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_elicitation() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "Elicitation".into(),
+            cwd: "/tmp".into(),
+            elicitation_id: Some("e-001".into()),
+            mcp_server_name: Some("srv".into()),
+            mode: Some("form".into()),
+            url: Some("https://example.com".into()),
+            requested_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT elicitation_id, mcp_server_name, mode, url, requested_schema FROM notification_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("elicitation_id").as_deref(),
+            Some("e-001")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("mcp_server_name").as_deref(),
+            Some("srv")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("mode").as_deref(),
+            Some("form")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("url").as_deref(),
+            Some("https://example.com")
+        );
+        assert!(row
+            .get::<Option<String>, _>("requested_schema")
+            .unwrap()
+            .contains("object"));
+    }
+
+    #[tokio::test]
+    async fn test_detail_elicitation_result() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "ElicitationResult".into(),
+            cwd: "/tmp".into(),
+            elicitation_id: Some("e-001".into()),
+            action: Some("accept".into()),
+            content: Some(serde_json::json!({"field": "value"})),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT action, content FROM notification_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("action").as_deref(),
+            Some("accept")
+        );
+        assert!(row
+            .get::<Option<String>, _>("content")
+            .unwrap()
+            .contains("value"));
+    }
+
+    #[tokio::test]
+    async fn test_detail_pre_compact() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PreCompact".into(),
+            cwd: "/tmp".into(),
+            trigger: Some("auto".into()),
+            custom_instructions: Some("keep it short".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT `trigger`, custom_instructions, compact_summary FROM compact_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("trigger").as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("custom_instructions")
+                .as_deref(),
+            Some("keep it short")
+        );
+        assert!(row.get::<Option<String>, _>("compact_summary").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_detail_post_compact() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PostCompact".into(),
+            cwd: "/tmp".into(),
+            trigger: Some("manual".into()),
+            compact_summary: Some("summarized".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT `trigger`, compact_summary FROM compact_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("trigger").as_deref(),
+            Some("manual")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("compact_summary").as_deref(),
+            Some("summarized")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_instructions_loaded() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "InstructionsLoaded".into(),
+            cwd: "/tmp".into(),
+            file_path: Some("/project/CLAUDE.md".into()),
+            memory_type: Some("project".into()),
+            load_reason: Some("session_start".into()),
+            globs: Some(vec!["*.md".into(), "*.txt".into()]),
+            trigger_file_path: Some("/trigger".into()),
+            parent_file_path: Some("/parent".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path FROM instruction_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("file_path").as_deref(),
+            Some("/project/CLAUDE.md")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("memory_type").as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("load_reason").as_deref(),
+            Some("session_start")
+        );
+        let globs_val = row.get::<Option<String>, _>("globs").unwrap();
+        assert!(globs_val.contains("*.md"));
+        assert!(globs_val.contains("*.txt"));
+        assert_eq!(
+            row.get::<Option<String>, _>("trigger_file_path").as_deref(),
+            Some("/trigger")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("parent_file_path").as_deref(),
+            Some("/parent")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_teammate_idle() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "TeammateIdle".into(),
+            cwd: "/tmp".into(),
+            teammate_name: Some("bob".into()),
+            team_name: Some("alpha".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT teammate_name, team_name FROM team_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("teammate_name").as_deref(),
+            Some("bob")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("team_name").as_deref(),
+            Some("alpha")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_task_completed() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "TaskCompleted".into(),
+            cwd: "/tmp".into(),
+            teammate_name: Some("bob".into()),
+            team_name: Some("alpha".into()),
+            task_id: Some("t-001".into()),
+            task_subject: Some("fix bug".into()),
+            task_description: Some("fixed the null pointer".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT task_id, task_subject, task_description FROM team_event_details WHERE event_id = ?",
+        )
+        .bind(eid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("task_id").as_deref(),
+            Some("t-001")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("task_subject").as_deref(),
+            Some("fix bug")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("task_description").as_deref(),
+            Some("fixed the null pointer")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_user_prompt_submit() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "UserPromptSubmit".into(),
+            cwd: "/tmp".into(),
+            prompt: Some("hello world".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row = sqlx::query("SELECT prompt FROM prompt_event_details WHERE event_id = ?")
+            .bind(eid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("prompt").as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detail_worktree_remove() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "WorktreeRemove".into(),
+            cwd: "/tmp".into(),
+            worktree_path: Some("/worktree/feature-x".into()),
+            ..Default::default()
+        };
+        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let row =
+            sqlx::query("SELECT worktree_path FROM worktree_event_details WHERE event_id = ?")
+                .bind(eid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("worktree_path").as_deref(),
+            Some("/worktree/feature-x")
+        );
     }
 }
