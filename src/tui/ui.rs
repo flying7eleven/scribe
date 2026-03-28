@@ -439,6 +439,39 @@ fn draw_stats_tab(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Sessions by model
+    if !st.models.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Sessions by model:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for m in &st.models {
+            lines.push(Line::from(format!(
+                "  {:<30} {}",
+                m.model,
+                format_count(m.session_count)
+            )));
+        }
+    }
+
+    // Tool failures
+    if !st.tool_failures.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Tool failures:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for tf in &st.tool_failures {
+            lines.push(Line::from(format!(
+                "  {:<20} {:<20} {}",
+                tf.tool_name,
+                tf.error,
+                format_count(tf.count)
+            )));
+        }
+    }
+
     // Top directories
     if !st.dirs.is_empty() {
         lines.push(Line::from(""));

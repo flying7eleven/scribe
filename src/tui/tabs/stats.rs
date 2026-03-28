@@ -1,4 +1,7 @@
-use crate::db::{self, DbStats, DirCount, ErrorSummary, EventTypeCount, ToolCount};
+use crate::db::{
+    self, DbStats, DirCount, ErrorSummary, EventTypeCount, ModelSessionCount, ToolCount,
+    ToolFailureCount,
+};
 use sqlx::SqlitePool;
 
 /// State for the Stats tab.
@@ -10,6 +13,8 @@ pub struct StatsState {
     pub errors: Option<ErrorSummary>,
     pub dirs: Vec<DirCount>,
     pub activity: Vec<(String, i64)>,
+    pub models: Vec<ModelSessionCount>,
+    pub tool_failures: Vec<ToolFailureCount>,
     pub db_path: String,
     pub db_size: u64,
     pub scroll_offset: u16,
@@ -27,6 +32,8 @@ impl StatsState {
             errors: None,
             dirs: Vec::new(),
             activity: Vec::new(),
+            models: Vec::new(),
+            tool_failures: Vec::new(),
             db_path: String::new(),
             db_size: 0,
             scroll_offset: 0,
@@ -50,6 +57,8 @@ impl StatsState {
         self.dirs = db::top_directories(pool, since, 5).await?;
         let raw_activity = db::daily_activity(pool, since).await?;
         self.activity = crate::cmd_stats::fill_zero_days(&raw_activity);
+        self.models = db::sessions_by_model(pool, since).await?;
+        self.tool_failures = db::tool_failures_by_error(pool, since).await?;
         self.db_path = db_path.to_string();
         self.db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
         self.scroll_offset = 0;
@@ -59,6 +68,8 @@ impl StatsState {
         lines += self.tools.len() as u16 + 2;
         lines += self.event_types.len() as u16 + 2;
         lines += 4; // errors section
+        lines += self.models.len() as u16 + 2;
+        lines += self.tool_failures.len() as u16 + 2;
         lines += self.dirs.len() as u16 + 2;
         lines += self.activity.len() as u16 + 2;
         self.total_lines = lines;

@@ -701,42 +701,79 @@ pub async fn error_summary(
             .await?
     };
 
-    // Application-side parsing of StopFailure error types from raw_payload
+    // StopFailure type breakdown via JOIN on stop_event_details (with fallback)
     let stop_failure_types = if stop_failure_count > 0 {
-        let mut sql =
-            String::from("SELECT raw_payload FROM events WHERE event_type = 'StopFailure'");
+        // Try JOIN-based query first
+        let mut sql = String::from(
+            "SELECT sed.error as error_type, COUNT(*) as count \
+             FROM events e \
+             JOIN stop_event_details sed ON sed.event_id = e.id \
+             WHERE e.event_type = 'StopFailure' AND sed.error IS NOT NULL",
+        );
         let mut binds: Vec<String> = Vec::new();
 
         if let Some(since) = since {
-            sql.push_str(" AND timestamp >= ?");
+            sql.push_str(" AND e.timestamp >= ?");
             binds.push(since.to_string());
         }
 
-        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        sql.push_str(" GROUP BY sed.error ORDER BY count DESC");
+
+        let mut query = sqlx::query(&sql);
         for bind in &binds {
             query = query.bind(bind);
         }
 
-        let payloads = query.fetch_all(pool).await?;
-
-        let mut type_counts: HashMap<String, i64> = HashMap::new();
-        for payload in &payloads {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                let error_type = value
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                *type_counts.entry(error_type).or_insert(0) += 1;
-            }
-        }
-
-        let mut types: Vec<StopFailureType> = type_counts
-            .into_iter()
-            .map(|(error_type, count)| StopFailureType { error_type, count })
+        let rows = query.fetch_all(pool).await?;
+        let types: Vec<StopFailureType> = rows
+            .iter()
+            .map(|row| StopFailureType {
+                error_type: row.get("error_type"),
+                count: row.get("count"),
+            })
             .collect();
-        types.sort_by(|a, b| b.count.cmp(&a.count));
-        types
+
+        if types.is_empty() {
+            // Fallback: detail tables not populated, parse raw_payload
+            eprintln!("hint: run 'scribe backfill' to populate detail tables for faster queries");
+
+            let mut fallback_sql =
+                String::from("SELECT raw_payload FROM events WHERE event_type = 'StopFailure'");
+            let mut fallback_binds: Vec<String> = Vec::new();
+
+            if let Some(since) = since {
+                fallback_sql.push_str(" AND timestamp >= ?");
+                fallback_binds.push(since.to_string());
+            }
+
+            let mut fallback_query = sqlx::query_scalar::<_, String>(&fallback_sql);
+            for bind in &fallback_binds {
+                fallback_query = fallback_query.bind(bind);
+            }
+
+            let payloads = fallback_query.fetch_all(pool).await?;
+
+            let mut type_counts: HashMap<String, i64> = HashMap::new();
+            for payload in &payloads {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let error_type = value
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    *type_counts.entry(error_type).or_insert(0) += 1;
+                }
+            }
+
+            let mut fallback_types: Vec<StopFailureType> = type_counts
+                .into_iter()
+                .map(|(error_type, count)| StopFailureType { error_type, count })
+                .collect();
+            fallback_types.sort_by(|a, b| b.count.cmp(&a.count));
+            fallback_types
+        } else {
+            types
+        }
     } else {
         Vec::new()
     };
@@ -1286,6 +1323,99 @@ pub async fn recent_enforcements(
             action: row.get("action"),
             reason: row.get("reason"),
             rule_id: row.get("rule_id"),
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Session count grouped by model name.
+#[derive(Debug, Serialize)]
+pub struct ModelSessionCount {
+    pub model: String,
+    pub session_count: i64,
+}
+
+/// Tool failure count grouped by tool name and error.
+#[derive(Debug, Serialize)]
+pub struct ToolFailureCount {
+    pub tool_name: String,
+    pub error: String,
+    pub count: i64,
+}
+
+/// Get session counts grouped by model from session_event_details.
+pub async fn sessions_by_model(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<ModelSessionCount>, Box<dyn std::error::Error>> {
+    let mut sql = String::from(
+        "SELECT sed.model, COUNT(DISTINCT e.session_id) as session_count \
+         FROM events e \
+         JOIN session_event_details sed ON sed.event_id = e.id \
+         WHERE e.event_type = 'SessionStart' AND sed.model IS NOT NULL",
+    );
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" AND e.timestamp >= ?");
+        binds.push(since.to_string());
+    }
+
+    sql.push_str(" GROUP BY sed.model ORDER BY session_count DESC");
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results: Vec<ModelSessionCount> = rows
+        .iter()
+        .map(|row| ModelSessionCount {
+            model: row.get("model"),
+            session_count: row.get("session_count"),
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Get tool failure counts grouped by tool name and error from tool_event_details.
+pub async fn tool_failures_by_error(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<ToolFailureCount>, Box<dyn std::error::Error>> {
+    let mut sql = String::from(
+        "SELECT e.tool_name, ted.error, COUNT(*) as count \
+         FROM events e \
+         JOIN tool_event_details ted ON ted.event_id = e.id \
+         WHERE e.event_type = 'PostToolUseFailure' AND ted.error IS NOT NULL",
+    );
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        sql.push_str(" AND e.timestamp >= ?");
+        binds.push(since.to_string());
+    }
+
+    sql.push_str(" GROUP BY e.tool_name, ted.error ORDER BY count DESC");
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    let results: Vec<ToolFailureCount> = rows
+        .iter()
+        .map(|row| {
+            let tool_name: Option<String> = row.get("tool_name");
+            ToolFailureCount {
+                tool_name: tool_name.unwrap_or_else(|| "unknown".to_string()),
+                error: row.get("error"),
+                count: row.get("count"),
+            }
         })
         .collect();
 
@@ -3055,5 +3185,155 @@ mod tests {
             row.get::<Option<String>, _>("worktree_path").as_deref(),
             Some("/worktree/feature-x")
         );
+    }
+
+    #[tokio::test]
+    async fn test_sessions_by_model() {
+        let (pool, _dir) = setup_detail_db().await;
+
+        // Insert SessionStart events with different models
+        for i in 0..3 {
+            let hook = crate::models::HookInput {
+                session_id: format!("sonnet-session-{i}"),
+                hook_event_name: "SessionStart".into(),
+                cwd: "/tmp".into(),
+                model: Some("claude-sonnet-4-20250514".into()),
+                ..Default::default()
+            };
+            insert_event(&pool, &hook, "{}").await.unwrap();
+        }
+        let hook = crate::models::HookInput {
+            session_id: "opus-session-1".into(),
+            hook_event_name: "SessionStart".into(),
+            cwd: "/tmp".into(),
+            model: Some("claude-opus-4-20250514".into()),
+            ..Default::default()
+        };
+        insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let results = sessions_by_model(&pool, None).await.unwrap();
+        assert_eq!(results.len(), 2);
+        // Sorted by count DESC
+        assert_eq!(results[0].model, "claude-sonnet-4-20250514");
+        assert_eq!(results[0].session_count, 3);
+        assert_eq!(results[1].model, "claude-opus-4-20250514");
+        assert_eq!(results[1].session_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_sessions_by_model_empty() {
+        let (pool, _dir) = setup_detail_db().await;
+        let results = sessions_by_model(&pool, None).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tool_failures_by_error() {
+        let (pool, _dir) = setup_detail_db().await;
+
+        // Insert PostToolUseFailure events with errors
+        for _ in 0..3 {
+            let hook = crate::models::HookInput {
+                session_id: "s1".into(),
+                hook_event_name: "PostToolUseFailure".into(),
+                cwd: "/tmp".into(),
+                tool_name: Some("Bash".into()),
+                error: Some("timeout".into()),
+                ..Default::default()
+            };
+            insert_event(&pool, &hook, "{}").await.unwrap();
+        }
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PostToolUseFailure".into(),
+            cwd: "/tmp".into(),
+            tool_name: Some("Read".into()),
+            error: Some("not_found".into()),
+            ..Default::default()
+        };
+        insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let results = tool_failures_by_error(&pool, None).await.unwrap();
+        assert_eq!(results.len(), 2);
+        // Sorted by count DESC
+        assert_eq!(results[0].tool_name, "Bash");
+        assert_eq!(results[0].error, "timeout");
+        assert_eq!(results[0].count, 3);
+        assert_eq!(results[1].tool_name, "Read");
+        assert_eq!(results[1].error, "not_found");
+        assert_eq!(results[1].count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_error_summary_with_detail_tables() {
+        let (pool, _dir) = setup_detail_db().await;
+
+        // Insert StopFailure events with stop_event_details populated
+        for _ in 0..2 {
+            let hook = crate::models::HookInput {
+                session_id: "s1".into(),
+                hook_event_name: "StopFailure".into(),
+                cwd: "/tmp".into(),
+                error: Some("context_limit".into()),
+                ..Default::default()
+            };
+            insert_event(&pool, &hook, r#"{"error":"context_limit"}"#)
+                .await
+                .unwrap();
+        }
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "StopFailure".into(),
+            cwd: "/tmp".into(),
+            error: Some("timeout".into()),
+            ..Default::default()
+        };
+        insert_event(&pool, &hook, r#"{"error":"timeout"}"#)
+            .await
+            .unwrap();
+
+        let summary = error_summary(&pool, None).await.unwrap();
+        assert_eq!(summary.stop_failure_count, 3);
+        assert_eq!(summary.stop_failure_types.len(), 2);
+        // Sorted by count DESC
+        assert_eq!(summary.stop_failure_types[0].error_type, "context_limit");
+        assert_eq!(summary.stop_failure_types[0].count, 2);
+        assert_eq!(summary.stop_failure_types[1].error_type, "timeout");
+        assert_eq!(summary.stop_failure_types[1].count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_error_summary_fallback() {
+        let (pool, _dir) = setup_detail_db().await;
+
+        // Insert StopFailure events directly (bypassing detail table population)
+        // by inserting into events table only
+        sqlx::query(
+            "INSERT INTO events (session_id, event_type, cwd, raw_payload) VALUES (?, ?, ?, ?)",
+        )
+        .bind("s1")
+        .bind("StopFailure")
+        .bind("/tmp")
+        .bind(r#"{"error":"context_limit"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO events (session_id, event_type, cwd, raw_payload) VALUES (?, ?, ?, ?)",
+        )
+        .bind("s1")
+        .bind("StopFailure")
+        .bind("/tmp")
+        .bind(r#"{"error":"context_limit"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let summary = error_summary(&pool, None).await.unwrap();
+        assert_eq!(summary.stop_failure_count, 2);
+        assert_eq!(summary.stop_failure_types.len(), 1);
+        assert_eq!(summary.stop_failure_types[0].error_type, "context_limit");
+        assert_eq!(summary.stop_failure_types[0].count, 2);
     }
 }
