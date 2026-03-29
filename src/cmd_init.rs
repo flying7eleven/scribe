@@ -355,8 +355,14 @@ mod tests {
         // WorktreeCreate has both user hook and scribe hook
         let wc_entries = hooks["WorktreeCreate"].as_array().unwrap();
         assert_eq!(wc_entries.len(), 2); // user + scribe
-        assert_eq!(wc_entries[0]["hooks"][0]["command"].as_str(), Some("my-worktree-handler"));
-        assert_eq!(wc_entries[1]["hooks"][0]["command"].as_str(), Some("scribe log"));
+        assert_eq!(
+            wc_entries[0]["hooks"][0]["command"].as_str(),
+            Some("my-worktree-handler")
+        );
+        assert_eq!(
+            wc_entries[1]["hooks"][0]["command"].as_str(),
+            Some("scribe log")
+        );
         assert_eq!(hooks.len(), 25); // all 25 scribe events
     }
 
