@@ -320,7 +320,7 @@ pub async fn insert_event(
             .execute(&mut *tx)
             .await?;
         }
-        "TeammateIdle" | "TaskCompleted" => {
+        "TeammateIdle" | "TaskCompleted" | "TaskCreated" => {
             sqlx::query(
                 "INSERT INTO team_event_details (event_id, teammate_name, team_name, task_id, task_subject, task_description) VALUES (?, ?, ?, ?, ?, ?)",
             )
@@ -1705,7 +1705,7 @@ pub async fn fetch_event_detail(
                 })
             }))
         }
-        "TeammateIdle" | "TaskCompleted" => {
+        "TeammateIdle" | "TaskCompleted" | "TaskCreated" => {
             let row = sqlx::query(
                 "SELECT teammate_name, team_name, task_id FROM team_event_details WHERE event_id = ?",
             )

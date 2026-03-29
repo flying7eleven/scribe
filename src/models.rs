@@ -281,6 +281,17 @@ mod tests {
     }
 
     #[test]
+    fn test_task_created() {
+        let h = parse(
+            r#"{"session_id":"s1","hook_event_name":"TaskCreated","cwd":"/tmp","task_id":"t1","task_subject":"implement feature","task_description":"add auth","teammate_name":"bob","team_name":"alpha"}"#,
+        );
+        assert_eq!(h.hook_event_name, "TaskCreated");
+        assert_eq!(h.task_id.as_deref(), Some("t1"));
+        assert_eq!(h.task_subject.as_deref(), Some("implement feature"));
+        assert_eq!(h.task_description.as_deref(), Some("add auth"));
+    }
+
+    #[test]
     fn test_unknown_fields_ignored() {
         let h = parse(
             r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/tmp","brand_new_field":"surprise","another":42}"#,
