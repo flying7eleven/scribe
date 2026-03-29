@@ -1,124 +1,138 @@
 # scribe
 
-A Rust CLI tool that hooks into Claude Code's lifecycle events, silently logs every tool action to a local SQLite database, and provides a query interface for auditing.
+**Audit logger for Claude Code** — silently captures every tool call, session, and system event to a local SQLite database, then lets you query, visualize, and enforce policies on what happened.
 
-## Quick Start
+## Why scribe?
 
-```bash
-# Build from source
-cargo build --release
+Claude Code runs tools on your behalf — Bash commands, file writes, edits, web searches. Scribe gives you a complete, queryable audit trail of everything Claude does, without slowing it down.
 
-# Register hooks with Claude Code (project-level)
-scribe init --project
-
-# Start using Claude Code — all events are now logged
-
-# What happened in the last hour?
-scribe query --since 1h
-
-# What Bash commands were run this week?
-scribe query --since 7d --tool Bash
-
-# Session overview
-scribe query sessions --since 7d
-
-# Database health check
-scribe stats
-```
+- **Full visibility**: 21 hook events captured, from tool calls to session lifecycle
+- **Zero friction**: One command to set up, then it runs invisibly in the background
+- **Fast**: < 10ms logging latency — Claude Code never waits on scribe
+- **Local & private**: Everything stays in a SQLite file on your machine
+- **Rich querying**: Filter by time, tool, session, event type, or full-text search
+- **Interactive dashboard**: A terminal UI for browsing sessions and watching events live
 
 ## Installation
 
 ```bash
-# Build and install
+# Build and install from source
 cargo install --path .
-
-# Or build in release mode
-cargo build --release
-# Binary is at target/release/scribe
 ```
 
-The binary bundles SQLite (via `sqlx-sqlite` with the `bundled` feature), so there are no system dependencies.
+No system dependencies required — SQLite is bundled.
 
-## Subcommands
-
-### `scribe log`
-
-The hot path. Called by Claude Code as a command hook for every matching event. Reads hook JSON from stdin, extracts fields, and inserts into SQLite.
+To enable optional policy enforcement (guard feature):
 
 ```bash
-echo '{"session_id":"...","hook_event_name":"PreToolUse",...}' | scribe log
+cargo install --path . --features guard
 ```
 
-- Always exits 0 (never blocks Claude Code)
-- Errors go to stderr
-- Target latency: < 10ms (stdin read + DB insert + exit)
-- Auto-retention: when `retention` is configured, periodically deletes expired events
+## Getting Started
+
+### 1. Register hooks with Claude Code
+
+```bash
+# Project-level (recommended)
+scribe init --project
+
+# Or globally for all projects
+scribe init --global
+```
+
+This writes the necessary hook configuration to your Claude Code settings. Safe to re-run — it merges cleanly with existing settings.
+
+### 2. Use Claude Code as usual
+
+Every tool call, session start/end, and system event is now logged automatically.
+
+### 3. Query your audit log
+
+```bash
+# What happened in the last hour?
+scribe query --since 1h
+
+# What Bash commands did Claude run today?
+scribe query --since 1d --tool Bash
+
+# Search for specific content
+scribe query --search "rm -rf"
+
+# Session overview for the past week
+scribe query sessions --since 7d
+```
+
+## Commands
 
 ### `scribe query`
 
 Browse the audit log with filters and multiple output formats.
 
 ```bash
-scribe query                          # Recent events (table)
-scribe query --since 1h               # Last hour
-scribe query --since 2025-06-01       # Since a date
-scribe query --tool Bash --limit 20   # Bash commands, max 20
-scribe query --search "rm -rf"        # Search in tool_input
-scribe query --session abc123         # Specific session
-scribe query --event PreToolUse       # Specific event type
-scribe query --json                   # JSON Lines output
-scribe query --csv > export.csv       # CSV export
+scribe query                              # Recent events (table)
+scribe query --since 1h                   # Last hour
+scribe query --since 2025-06-01           # Since a specific date
+scribe query --tool Bash --limit 20       # Filter by tool, limit results
+scribe query --session abc123             # Specific session
+scribe query --event PreToolUse           # Specific event type
+scribe query --search "pattern"           # Search tool input
+scribe query --json                       # JSON Lines output
+scribe query --csv > export.csv           # CSV export
 ```
 
-**Session summary:**
+**Session summaries:**
 
 ```bash
-scribe query sessions                 # All sessions
-scribe query sessions --since 7d      # Recent sessions
-scribe query sessions --json          # JSON Lines with full IDs
+scribe query sessions                     # All sessions
+scribe query sessions --since 7d          # Recent sessions
+scribe query sessions --json              # JSON Lines for scripting
 ```
-
-**Filter flags:** `--since`, `--until`, `--session`, `--event`, `--tool`, `--search`, `--limit`, `--json`, `--csv`
-
-### `scribe init`
-
-Generate the Claude Code `settings.json` hook configuration.
-
-```bash
-scribe init                  # Print JSON to stdout
-scribe init --project        # Write/merge to .claude/settings.json
-scribe init --global         # Write/merge to ~/.claude/settings.json
-```
-
-Registers `scribe log` for all 21 supported hook events. When merging into an existing file, preserves all non-scribe hooks and settings. Safe to re-run (idempotent).
-
-### `scribe retain`
-
-Delete events older than a given duration and clean up orphaned sessions.
-
-```bash
-scribe retain 90d            # Delete events older than 90 days
-scribe retain 30d            # Delete events older than 30 days
-scribe retain 1w             # Delete events older than 1 week
-```
-
-Runs deletion + orphan cleanup in a single transaction. Reclaims disk space via `PRAGMA incremental_vacuum`.
 
 ### `scribe stats`
 
-Show database metrics at a glance.
+Dashboard with database metrics, top tools, activity histograms, and error summaries.
 
 ```bash
-scribe stats
+scribe stats                              # Full dashboard
+scribe stats --since 7d                   # Stats for the past week
+scribe stats --json                       # JSON output for scripting
 ```
 
+### `scribe tui`
+
+Interactive terminal UI with live event streaming.
+
+```bash
+scribe tui                                # Launch the TUI
+scribe tui --since 7d                     # Pre-filter to recent data
 ```
-Database:  /home/user/.claude/scribe.db
-Size:      1.2 MB
-Events:    12,847
-Sessions:  42
-Oldest:    2025-03-15 08:22:01
-Newest:    2025-06-23 17:45:33
+
+**Tabs:**
+- **Sessions** — browse all sessions with timestamps and event counts
+- **Events** — searchable event browser
+- **Stats** — live dashboard with all metrics
+- **Live** — real-time event stream with auto-scroll
+
+Press `?` for keybindings.
+
+### `scribe retain`
+
+Clean up old data and reclaim disk space.
+
+```bash
+scribe retain 90d                         # Delete events older than 90 days
+scribe retain 30d                         # 30 days
+scribe retain 1w                          # 1 week
+```
+
+### `scribe init`
+
+Generate or update the Claude Code hook configuration.
+
+```bash
+scribe init                               # Print config to stdout
+scribe init --project                     # Write to .claude/settings.json
+scribe init --global                      # Write to ~/.claude/settings.json
 ```
 
 ### `scribe completions`
@@ -131,126 +145,92 @@ scribe completions zsh > ~/.zfunc/_scribe
 scribe completions fish > ~/.config/fish/completions/scribe.fish
 ```
 
-Supports: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+Supports: bash, zsh, fish, elvish, powershell.
 
 ## Configuration
 
-### Database Path
-
-Resolved with 4-layer precedence (highest wins):
-
-1. `--db <path>` CLI flag
-2. `SCRIBE_DB` environment variable
-3. Config file `db_path`
-4. Default: `~/.claude/scribe.db`
-
-### Config File
-
-Optional config at `~/.config/claude-scribe/config.toml`:
+Scribe uses an optional config file at `~/.config/claude-scribe/config.toml`. It is created automatically on first interactive run.
 
 ```toml
-# Database path (overrides default, overridden by --db and SCRIBE_DB)
+# Custom database path (default: ~/.claude/scribe.db)
 db_path = "/home/user/audit/scribe.db"
 
-# Auto-retention: delete events older than this duration
-# When set, `scribe log` periodically enforces this
+# Auto-delete events older than this duration
 retention = "90d"
 
 # How often to check for expired events (default: 24h)
 retention_check_interval = "24h"
 
-# Default query limit (overrides the compiled default of 50)
+# Default query result limit (default: 50)
 default_query_limit = 100
+
+# Exclude stale sessions from average duration calculation
+max_session_duration = "8h"
 ```
 
-All fields are optional. A missing config file is normal (not an error).
+All fields are optional. A missing config file is perfectly fine.
+
+### Database path precedence
+
+| Priority | Source |
+|----------|--------|
+| 1 (highest) | `--db <path>` CLI flag |
+| 2 | `SCRIBE_DB` environment variable |
+| 3 | `db_path` in config file |
+| 4 (default) | `~/.claude/scribe.db` |
+
+## Guard: Policy Enforcement (optional)
+
+When built with `--features guard`, scribe can enforce rules on Claude Code tool calls in real time.
+
+```bash
+# Initialize with guard hooks
+scribe init --project --with-guard
+
+# Add a policy rule
+scribe policy add --name no-force-push \
+  --tool Bash \
+  --pattern "git push.*--force" \
+  --action deny
+
+# List active policies
+scribe policy list
+
+# Classify past tool calls by risk level
+scribe classify --since 7d
+scribe classify --risk dangerous --details
+```
+
+Guard uses a fail-open design — if scribe encounters an error, the tool call is allowed through so Claude Code is never blocked.
 
 ## Hook Events
 
-scribe logs 21 of 22 Claude Code hook events:
+Scribe captures 21 Claude Code hook events across these categories:
 
-| Event | Matcher | Category |
-|-------|---------|----------|
-| PreToolUse | tool name | Tool |
-| PostToolUse | tool name | Tool |
-| PostToolUseFailure | tool name | Tool |
-| PermissionRequest | tool name | Tool |
-| UserPromptSubmit | - | User |
-| SessionStart | session source | Session |
-| SessionEnd | exit reason | Session |
-| SubagentStart | agent type | Agent |
-| SubagentStop | agent type | Agent |
-| Stop | - | Stop |
-| StopFailure | error type | Stop |
-| Notification | notification type | System |
-| PreCompact | trigger | Compact |
-| PostCompact | trigger | Compact |
-| InstructionsLoaded | load reason | Config |
-| ConfigChange | config source | Config |
-| WorktreeRemove | - | Worktree |
-| Elicitation | MCP server | Elicit |
-| ElicitationResult | MCP server | Elicit |
-| TeammateIdle | - | Team |
-| TaskCompleted | - | Team |
-
-**WorktreeCreate** is intentionally excluded (its stdout is used for worktree path communication).
-
-## Database Schema
-
-SQLite with WAL mode, stored at `~/.claude/scribe.db` by default.
-
-**`events`** — one row per hook invocation:
-`id`, `timestamp`, `session_id`, `event_type`, `tool_name`, `tool_input`, `tool_response`, `cwd`, `permission_mode`, `raw_payload`
-
-**`sessions`** — one row per session (auto-upserted):
-`session_id`, `first_seen`, `last_seen`, `cwd`, `event_count`
-
-**`_metadata`** — internal key-value store (auto-retention tracking)
-
-Indexed on: `session_id`, `event_type`, `tool_name`, `timestamp`.
-
-## Project Structure
-
-```
-src/
-  main.rs              # CLI dispatch + tokio runtime
-  db.rs                # SQLite connection, migrations, queries
-  models.rs            # HookInput struct (serde deserialization)
-  config.rs            # Config file loading
-  cmd_log.rs           # `log` subcommand handler
-  cmd_query.rs         # `query` subcommand handler + formatters
-  cmd_init.rs          # `init` subcommand handler + merge logic
-  cmd_retain.rs        # `retain` subcommand handler
-  cmd_stats.rs         # `stats` subcommand handler
-  cmd_completions.rs   # `completions` subcommand handler
-migrations/
-  20250101000000_initial.sql    # events + sessions tables
-  20250201000000_metadata.sql   # _metadata table
-tests/
-  log_integration.rs
-  init_integration.rs
-  query_integration.rs
-  retain_integration.rs
-  stats_integration.rs
-  completions_integration.rs
-```
+| Category | Events |
+|----------|--------|
+| **Tool** | PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest |
+| **User** | UserPromptSubmit |
+| **Session** | SessionStart, SessionEnd |
+| **Agent** | SubagentStart, SubagentStop |
+| **Stop** | Stop, StopFailure |
+| **System** | Notification, ConfigChange, InstructionsLoaded |
+| **Compact** | PreCompact, PostCompact |
+| **Worktree** | WorktreeRemove |
+| **Elicitation** | Elicitation, ElicitationResult |
+| **Team** | TeammateIdle, TaskCompleted |
 
 ## Development
 
 ```bash
-cargo build              # Build
-cargo test               # Run all 182 tests
-cargo clippy             # Lint
-cargo fmt --check        # Check formatting
+cargo build                               # Build
+cargo test                                # Run tests
+cargo clippy                              # Lint
+cargo fmt --check                         # Check formatting
+
+# Build with guard feature
+cargo build --features guard
 ```
-
-## Design Constraints
-
-- **Always exit 0** on `scribe log` — never block Claude Code
-- **< 10ms** target latency for the log hot path
-- **WAL mode** for concurrent writes from multiple sessions
-- **Resilience-first** JSON parsing — unknown fields are silently ignored
-- **`raw_payload`** stores the complete original JSON for lossless auditing
 
 ## License
 
