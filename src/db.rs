@@ -117,7 +117,8 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, Box<dyn std::error::Er
         .create_if_missing(true)
         .pragma("journal_mode", "WAL")
         .pragma("auto_vacuum", "INCREMENTAL")
-        .pragma("busy_timeout", "5000");
+        .pragma("busy_timeout", "5000")
+        .pragma("foreign_keys", "ON");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -1785,6 +1786,118 @@ mod tests {
             .unwrap();
         let timeout: i32 = row.get(0);
         assert_eq!(timeout, 5000);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_foreign_keys_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fk_test.db");
+        let db_str = db_path.to_str().unwrap();
+
+        let pool = connect(db_str).await.unwrap();
+        let row = sqlx::query("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let fk: i32 = row.get(0);
+        assert_eq!(fk, 1, "foreign_keys pragma must be ON");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_cascade_delete_removes_detail_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cascade_test.db");
+        let db_str = db_path.to_str().unwrap();
+        let pool = connect(db_str).await.unwrap();
+
+        // Insert a PreToolUse event (creates events row + tool_event_details row)
+        let hook = crate::models::HookInput {
+            session_id: "s-cascade".to_string(),
+            hook_event_name: "PreToolUse".to_string(),
+            cwd: "/tmp".to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_use_id: Some("tu-123".to_string()),
+            ..Default::default()
+        };
+        let event_id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        // Verify detail row exists
+        let detail_count: i64 =
+            sqlx::query("SELECT COUNT(*) as cnt FROM tool_event_details WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("cnt");
+        assert_eq!(detail_count, 1, "detail row should exist before delete");
+
+        // Delete the event
+        sqlx::query("DELETE FROM events WHERE id = ?")
+            .bind(event_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Verify detail row was CASCADE-deleted
+        let detail_count_after: i64 =
+            sqlx::query("SELECT COUNT(*) as cnt FROM tool_event_details WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("cnt");
+        assert_eq!(
+            detail_count_after, 0,
+            "detail row should be CASCADE-deleted"
+        );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_cascade_delete_with_retain() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("retain_cascade.db");
+        let db_str = db_path.to_str().unwrap();
+        let pool = connect(db_str).await.unwrap();
+
+        // Insert a SessionStart event
+        let hook = crate::models::HookInput {
+            session_id: "s-retain".to_string(),
+            hook_event_name: "SessionStart".to_string(),
+            cwd: "/tmp".to_string(),
+            source: Some("startup".to_string()),
+            model: Some("claude-sonnet".to_string()),
+            ..Default::default()
+        };
+        let event_id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        // Verify session_event_details row exists
+        let count: i64 =
+            sqlx::query("SELECT COUNT(*) as cnt FROM session_event_details WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("cnt");
+        assert_eq!(count, 1);
+
+        // Use delete_events_before (same as scribe retain)
+        let future = "9999-12-31T23:59:59Z";
+        delete_events_before(&pool, future).await.unwrap();
+
+        // Verify cascade cleaned up detail row
+        let count_after: i64 =
+            sqlx::query("SELECT COUNT(*) as cnt FROM session_event_details WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("cnt");
+        assert_eq!(count_after, 0, "retain should CASCADE-delete detail rows");
+
         pool.close().await;
     }
 
