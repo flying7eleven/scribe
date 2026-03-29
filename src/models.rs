@@ -281,6 +281,15 @@ mod tests {
     }
 
     #[test]
+    fn test_file_changed() {
+        let h = parse(
+            r#"{"session_id":"s1","hook_event_name":"FileChanged","cwd":"/project"}"#,
+        );
+        assert_eq!(h.hook_event_name, "FileChanged");
+        assert_eq!(h.cwd, "/project");
+    }
+
+    #[test]
     fn test_cwd_changed() {
         let h = parse(
             r#"{"session_id":"s1","hook_event_name":"CwdChanged","cwd":"/new/working/dir"}"#,
