@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::filter::{filter_events, filter_sessions};
 use super::tabs::events::{self, DetailMode};
+#[cfg(feature = "guard")]
 use super::tabs::policy::PolicyPane;
 use crate::format::{
     format_count, format_date_label, format_duration, format_size, format_timestamp, histogram_bar,
@@ -57,6 +58,7 @@ fn draw_tab_content(frame: &mut Frame, app: &App, area: Rect) {
         Tab::Events => draw_events_tab(frame, app, area),
         Tab::Stats => draw_stats_tab(frame, app, area),
         Tab::Live => draw_live_tab(frame, app, area),
+        #[cfg(feature = "guard")]
         Tab::Policy => draw_policy_tab(frame, app, area),
     }
 }
@@ -627,6 +629,7 @@ fn draw_live_tab(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, chunks[2]);
 }
 
+#[cfg(feature = "guard")]
 /// Draw the Policy tab with classification summary, enforcements, and rules.
 fn draw_policy_tab(frame: &mut Frame, app: &App, area: Rect) {
     let policy = &app.policy;
@@ -673,6 +676,7 @@ fn draw_policy_tab(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, chunks[3]);
 }
 
+#[cfg(feature = "guard")]
 /// Draw the classification summary bar.
 fn draw_classification_summary(
     frame: &mut Frame,
@@ -715,6 +719,7 @@ fn draw_classification_summary(
     frame.render_widget(para, area);
 }
 
+#[cfg(feature = "guard")]
 /// Draw the enforcements pane.
 fn draw_enforcements_pane(
     frame: &mut Frame,
@@ -817,6 +822,7 @@ fn draw_enforcements_pane(
     frame.render_widget(table, area);
 }
 
+#[cfg(feature = "guard")]
 /// Draw the rules pane.
 fn draw_rules_pane(frame: &mut Frame, policy: &super::tabs::policy::PolicyState, area: Rect) {
     let is_active = policy.active_pane == PolicyPane::Rules;

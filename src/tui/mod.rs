@@ -63,6 +63,7 @@ pub async fn run(
         if app.active_tab == Tab::Live && !app.live.initialized {
             let _ = app.live.initialize(pool).await;
         }
+        #[cfg(feature = "guard")]
         if app.active_tab == Tab::Policy && !app.policy.loaded {
             let _ = app.policy.load(pool).await;
         }
@@ -109,6 +110,7 @@ pub async fn run(
                         app.set_tab(Tab::Stats);
                     }
                     KeyCode::Char('4') => app.set_tab(Tab::Live),
+                    #[cfg(feature = "guard")]
                     KeyCode::Char('5') => {
                         app.policy.loaded = false; // refresh on switch
                         app.set_tab(Tab::Policy);
@@ -119,6 +121,7 @@ pub async fn run(
                         // Tab toggles detail mode when detail is expanded
                         app.events.toggle_detail_mode();
                     }
+                    #[cfg(feature = "guard")]
                     KeyCode::Tab if app.active_tab == Tab::Policy => {
                         // Tab cycles pane within the Policy tab
                         app.policy.next_pane();
@@ -149,6 +152,7 @@ pub async fn run(
                         }
                         Tab::Stats => handle_stats_key(&mut app, key.code),
                         Tab::Live => handle_live_key(&mut app, key.code),
+                        #[cfg(feature = "guard")]
                         Tab::Policy => handle_policy_key(&mut app, key.code),
                     },
                 }
@@ -243,6 +247,7 @@ fn handle_live_key(app: &mut App, key: KeyCode) {
     }
 }
 
+#[cfg(feature = "guard")]
 /// Handle key events specific to the Policy tab.
 fn handle_policy_key(app: &mut App, key: KeyCode) {
     match key {

@@ -894,12 +894,14 @@ pub async fn daily_activity(
 // ── Classification DB operations (E009) ──
 
 /// Count of classifications by risk level.
+#[cfg(feature = "guard")]
 #[derive(Debug)]
 pub struct ClassificationCount {
     pub risk_level: String,
     pub count: i64,
 }
 
+#[cfg(feature = "guard")]
 /// Check if an event already has a classification.
 pub async fn has_classification_for_event(
     pool: &SqlitePool,
@@ -913,6 +915,7 @@ pub async fn has_classification_for_event(
     Ok(count > 0)
 }
 
+#[cfg(feature = "guard")]
 /// Insert a classification result.
 pub async fn insert_classification(
     pool: &SqlitePool,
@@ -935,6 +938,7 @@ pub async fn insert_classification(
     Ok(result.last_insert_rowid())
 }
 
+#[cfg(feature = "guard")]
 /// Get classification counts by risk level, optionally filtered by time.
 pub async fn classification_summary(
     pool: &SqlitePool,
@@ -971,6 +975,7 @@ pub async fn classification_summary(
 // ── Rules & enforcement DB operations (E009) ──
 
 /// A rule row from the rules table.
+#[cfg(feature = "guard")]
 #[derive(Debug)]
 #[allow(dead_code)] // priority used for ordering in DB query, accessed in policy CLI (US-0037)
 pub struct RuleRow {
@@ -982,6 +987,7 @@ pub struct RuleRow {
     pub priority: i64,
 }
 
+#[cfg(feature = "guard")]
 /// Load all enabled rules, ordered by priority DESC, id DESC.
 pub async fn load_enabled_rules(
     pool: &SqlitePool,
@@ -1008,6 +1014,7 @@ pub async fn load_enabled_rules(
     Ok(results)
 }
 
+#[cfg(feature = "guard")]
 /// Insert an enforcement record.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_enforcement(
@@ -1040,6 +1047,7 @@ pub async fn insert_enforcement(
 // ── Policy CLI DB operations (US-0037) ──
 
 /// A full rule row including metadata fields.
+#[cfg(feature = "guard")]
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct FullRuleRow {
@@ -1054,6 +1062,7 @@ pub struct FullRuleRow {
     pub created_at: String,
 }
 
+#[cfg(feature = "guard")]
 /// A classification row for the promote subcommand.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -1066,6 +1075,7 @@ pub struct ClassificationRow {
     pub heuristic: String,
 }
 
+#[cfg(feature = "guard")]
 /// Enforcement statistics.
 #[derive(Debug)]
 pub struct EnforcementStats {
@@ -1075,6 +1085,7 @@ pub struct EnforcementStats {
     pub top_denied: Vec<TopDeniedRule>,
 }
 
+#[cfg(feature = "guard")]
 /// A top denied rule entry for stats display.
 #[derive(Debug)]
 pub struct TopDeniedRule {
@@ -1083,6 +1094,7 @@ pub struct TopDeniedRule {
     pub count: i64,
 }
 
+#[cfg(feature = "guard")]
 /// Insert a new policy rule.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_rule(
@@ -1110,6 +1122,7 @@ pub async fn insert_rule(
     Ok(result.last_insert_rowid())
 }
 
+#[cfg(feature = "guard")]
 /// Delete a rule by ID. Returns true if a row was deleted.
 pub async fn delete_rule(pool: &SqlitePool, id: i64) -> Result<bool, Box<dyn std::error::Error>> {
     let result = sqlx::query("DELETE FROM rules WHERE id = ?")
@@ -1119,6 +1132,7 @@ pub async fn delete_rule(pool: &SqlitePool, id: i64) -> Result<bool, Box<dyn std
     Ok(result.rows_affected() > 0)
 }
 
+#[cfg(feature = "guard")]
 /// Update the enabled status of a rule. Returns true if a row was updated.
 pub async fn update_rule_enabled(
     pool: &SqlitePool,
@@ -1135,6 +1149,7 @@ pub async fn update_rule_enabled(
     Ok(result.rows_affected() > 0)
 }
 
+#[cfg(feature = "guard")]
 /// List rules, optionally including disabled ones.
 pub async fn list_rules(
     pool: &SqlitePool,
@@ -1171,12 +1186,14 @@ pub async fn list_rules(
     Ok(results)
 }
 
+#[cfg(feature = "guard")]
 /// Delete all rules. Returns the count deleted.
 pub async fn delete_all_rules(pool: &SqlitePool) -> Result<u64, Box<dyn std::error::Error>> {
     let result = sqlx::query("DELETE FROM rules").execute(pool).await?;
     Ok(result.rows_affected())
 }
 
+#[cfg(feature = "guard")]
 /// Get enforcement statistics, optionally filtered by time.
 pub async fn enforcement_stats(
     pool: &SqlitePool,
@@ -1261,6 +1278,7 @@ pub async fn enforcement_stats(
     })
 }
 
+#[cfg(feature = "guard")]
 /// Get a classification by ID (for the promote subcommand).
 pub async fn get_classification(
     pool: &SqlitePool,
@@ -1287,6 +1305,7 @@ pub async fn get_classification(
 // ── Recent enforcements for TUI (US-0038) ──
 
 /// A single enforcement row for display.
+#[cfg(feature = "guard")]
 #[derive(Debug)]
 #[allow(dead_code)] // id and session_id retained for future use (e.g. drill-down)
 pub struct EnforcementRow {
@@ -1300,6 +1319,7 @@ pub struct EnforcementRow {
     pub rule_id: Option<i64>,
 }
 
+#[cfg(feature = "guard")]
 /// Fetch recent enforcements ordered by timestamp descending.
 pub async fn recent_enforcements(
     pool: &SqlitePool,

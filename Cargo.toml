@@ -3,6 +3,9 @@ name = "scribe"
 version = "1.0.0-beta2"
 edition = "2021"
 
+[features]
+guard = ["regex"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -18,7 +21,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 sqlx-sqlite = { version = "0.8", features = ["bundled"] }
 ratatui = "0.29"
-regex = "1"
+regex = { version = "1", optional = true }
 toml = "0.8"
 toml_edit = "0.22"
 tokio = { version = "1", features = ["rt", "macros"] }

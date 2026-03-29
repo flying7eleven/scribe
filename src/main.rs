@@ -1,10 +1,14 @@
+#[cfg(feature = "guard")]
 pub mod classify;
 mod cmd_backfill;
+#[cfg(feature = "guard")]
 mod cmd_classify;
 mod cmd_completions;
+#[cfg(feature = "guard")]
 mod cmd_guard;
 mod cmd_init;
 mod cmd_log;
+#[cfg(feature = "guard")]
 mod cmd_policy;
 mod cmd_query;
 mod cmd_retain;
@@ -80,6 +84,7 @@ enum Commands {
         #[arg(long, conflicts_with = "project")]
         global: bool,
         /// Include scribe guard on PreToolUse for policy enforcement
+        #[cfg(feature = "guard")]
         #[arg(long)]
         with_guard: bool,
     },
@@ -103,6 +108,7 @@ enum Commands {
         shell: clap_complete::Shell,
     },
     /// Classify historical tool calls by risk level
+    #[cfg(feature = "guard")]
     Classify {
         /// Only classify events after this time (duration or date)
         #[arg(long)]
@@ -118,11 +124,13 @@ enum Commands {
         json: bool,
     },
     /// Manage policy enforcement rules
+    #[cfg(feature = "guard")]
     Policy {
         #[command(subcommand)]
         command: cmd_policy::PolicyCommand,
     },
     /// Evaluate tool call against policy rules (PreToolUse hook)
+    #[cfg(feature = "guard")]
     Guard,
     /// Backfill detail tables from existing event raw_payload data
     Backfill {
@@ -165,7 +173,12 @@ enum QuerySub {
 
 /// Returns true for subcommands that are user-interactive (not the `log` hot path).
 fn is_interactive_command(cmd: &Commands) -> bool {
-    !matches!(cmd, Commands::Log | Commands::Guard)
+    match cmd {
+        Commands::Log => false,
+        #[cfg(feature = "guard")]
+        Commands::Guard => false,
+        _ => true,
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -187,6 +200,7 @@ async fn main() {
         Commands::Init {
             project,
             global,
+            #[cfg(feature = "guard")]
             with_guard,
         } => {
             let target = if project {
@@ -196,7 +210,11 @@ async fn main() {
             } else {
                 cmd_init::OutputTarget::Stdout
             };
-            if let Err(e) = cmd_init::run(target, None, with_guard) {
+            #[cfg(feature = "guard")]
+            let guard = with_guard;
+            #[cfg(not(feature = "guard"))]
+            let guard = false;
+            if let Err(e) = cmd_init::run(target, None, guard) {
                 eprintln!("scribe: init error: {e}");
                 std::process::exit(1);
             }
@@ -240,6 +258,7 @@ async fn main() {
                 eprintln!("scribe: log error: {e}");
             }
         }
+        #[cfg(feature = "guard")]
         Commands::Guard => {
             let exit_code = cmd_guard::run(&pool).await;
             if exit_code != 0 {
@@ -331,6 +350,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "guard")]
         Commands::Classify {
             since,
             details,
@@ -348,6 +368,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "guard")]
         Commands::Policy { command } => {
             if let Err(e) = cmd_policy::run(&pool, command).await {
                 eprintln!("scribe: policy error: {e}");

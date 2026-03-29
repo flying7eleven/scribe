@@ -3,21 +3,24 @@ use std::time::Duration;
 use super::filter::FilterState;
 use super::tabs::events::EventsState;
 use super::tabs::live::LiveState;
+#[cfg(feature = "guard")]
 use super::tabs::policy::PolicyState;
 use super::tabs::sessions::SessionsState;
 use super::tabs::stats::StatsState;
 
-/// The five navigable tabs in the TUI.
+/// The navigable tabs in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Sessions,
     Events,
     Stats,
     Live,
+    #[cfg(feature = "guard")]
     Policy,
 }
 
 impl Tab {
+    #[cfg(feature = "guard")]
     pub const ALL: [Tab; 5] = [
         Tab::Sessions,
         Tab::Events,
@@ -26,12 +29,16 @@ impl Tab {
         Tab::Policy,
     ];
 
+    #[cfg(not(feature = "guard"))]
+    pub const ALL: [Tab; 4] = [Tab::Sessions, Tab::Events, Tab::Stats, Tab::Live];
+
     pub fn title(&self) -> &'static str {
         match self {
             Tab::Sessions => "Sessions",
             Tab::Events => "Events",
             Tab::Stats => "Stats",
             Tab::Live => "Live",
+            #[cfg(feature = "guard")]
             Tab::Policy => "Policy",
         }
     }
@@ -42,6 +49,7 @@ impl Tab {
             Tab::Events => 1,
             Tab::Stats => 2,
             Tab::Live => 3,
+            #[cfg(feature = "guard")]
             Tab::Policy => 4,
         }
     }
@@ -52,6 +60,7 @@ impl Tab {
             1 => Some(Tab::Events),
             2 => Some(Tab::Stats),
             3 => Some(Tab::Live),
+            #[cfg(feature = "guard")]
             4 => Some(Tab::Policy),
             _ => None,
         }
@@ -71,6 +80,7 @@ pub struct App {
     pub events: EventsState,
     pub stats: StatsState,
     pub live: LiveState,
+    #[cfg(feature = "guard")]
     pub policy: PolicyState,
     pub filter: FilterState,
 }
@@ -88,6 +98,7 @@ impl App {
             events: EventsState::new(),
             stats: StatsState::new(),
             live: LiveState::new(),
+            #[cfg(feature = "guard")]
             policy: PolicyState::new(),
             filter: FilterState::new(),
         }
@@ -153,8 +164,11 @@ mod tests {
         app.next_tab();
         assert_eq!(app.active_tab, Tab::Live);
 
-        app.next_tab();
-        assert_eq!(app.active_tab, Tab::Policy);
+        #[cfg(feature = "guard")]
+        {
+            app.next_tab();
+            assert_eq!(app.active_tab, Tab::Policy);
+        }
 
         app.next_tab(); // wraps
         assert_eq!(app.active_tab, Tab::Sessions);
@@ -165,11 +179,22 @@ mod tests {
         let mut app = App::new(Duration::from_secs(1), None, String::new());
         assert_eq!(app.active_tab, Tab::Sessions);
 
-        app.prev_tab(); // wraps to Policy
+        app.prev_tab(); // wraps to last tab
+        #[cfg(feature = "guard")]
         assert_eq!(app.active_tab, Tab::Policy);
-
-        app.prev_tab();
+        #[cfg(not(feature = "guard"))]
         assert_eq!(app.active_tab, Tab::Live);
+
+        #[cfg(feature = "guard")]
+        {
+            app.prev_tab();
+            assert_eq!(app.active_tab, Tab::Live);
+        }
+        #[cfg(not(feature = "guard"))]
+        {
+            app.prev_tab();
+            assert_eq!(app.active_tab, Tab::Stats);
+        }
     }
 
     #[test]

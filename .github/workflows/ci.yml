@@ -11,13 +11,16 @@ env:
 
 jobs:
   check:
-    name: Check
+    name: Check (${{ matrix.features || 'default' }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "--features guard"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check
+      - run: cargo check ${{ matrix.features }}
 
   fmt:
     name: Rustfmt
@@ -30,21 +33,27 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.features || 'default' }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "--features guard"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy ${{ matrix.features }} -- -D warnings
 
   test:
-    name: Test
+    name: Test (${{ matrix.features || 'default' }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "--features guard"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test ${{ matrix.features }}
