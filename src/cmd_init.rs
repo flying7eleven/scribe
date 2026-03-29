@@ -153,13 +153,11 @@ fn merge_and_write(path: &PathBuf, config: &Value) -> Result<(), Box<dyn std::er
 
         if let Some(existing_array) = existing_hooks.get_mut(event_name) {
             if let Some(arr) = existing_array.as_array_mut() {
-                // Find and replace existing scribe entry, or append
-                let scribe_idx = arr.iter().position(is_scribe_entry);
-                if let Some(idx) = scribe_idx {
-                    arr[idx] = generated_entry.clone();
-                } else {
-                    arr.push(generated_entry.clone());
-                }
+                // Remove all existing scribe entries, then append the fresh one.
+                // Using retain+push (instead of replacing a single entry) ensures
+                // duplicates from previous buggy runs are cleaned up too.
+                arr.retain(|entry| !is_scribe_entry(entry));
+                arr.push(generated_entry.clone());
             }
         } else {
             // Event not present in existing file — add it
@@ -174,7 +172,7 @@ fn merge_and_write(path: &PathBuf, config: &Value) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Check if a hook entry is a scribe entry (command starts with "scribe log").
+/// Check if a hook entry belongs to scribe (any command starting with "scribe ").
 fn is_scribe_entry(entry: &Value) -> bool {
     entry["hooks"]
         .as_array()
@@ -182,7 +180,7 @@ fn is_scribe_entry(entry: &Value) -> bool {
             hooks.iter().any(|h| {
                 h["command"]
                     .as_str()
-                    .is_some_and(|cmd| cmd.starts_with("scribe log"))
+                    .is_some_and(|cmd| cmd.starts_with("scribe "))
             })
         })
         .unwrap_or(false)
@@ -446,6 +444,65 @@ mod tests {
             first, second,
             "Running init twice should produce identical output"
         );
+    }
+
+    #[test]
+    fn test_merge_is_idempotent_with_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let config = generate_hooks_config(true);
+        merge_and_write(&path, &config).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        merge_and_write(&path, &config).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            first, second,
+            "Running init twice with guard should produce identical output"
+        );
+    }
+
+    #[test]
+    fn test_merge_cleans_up_duplicate_scribe_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Pre-populate with duplicated scribe entries on PreToolUse
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"scribe log","timeout":10}]},{"matcher":"*","hooks":[{"type":"command","command":"scribe log","timeout":10}]}]}}"#,
+        )
+        .unwrap();
+
+        let config = generate_hooks_config(false);
+        merge_and_write(&path, &config).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "Duplicates should be cleaned up to one entry");
+    }
+
+    #[test]
+    fn test_is_scribe_entry_detects_guard() {
+        let guard_only = json!({
+            "matcher": "*",
+            "hooks": [{"type": "command", "command": "scribe guard", "timeout": 10}]
+        });
+        assert!(is_scribe_entry(&guard_only));
+
+        let log_only = json!({
+            "hooks": [{"type": "command", "command": "scribe log", "timeout": 10}]
+        });
+        assert!(is_scribe_entry(&log_only));
+
+        let user_hook = json!({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "my-linter"}]
+        });
+        assert!(!is_scribe_entry(&user_hook));
     }
 
     #[test]
