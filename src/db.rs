@@ -340,7 +340,7 @@ pub async fn insert_event(
                 .execute(&mut *tx)
                 .await?;
         }
-        "WorktreeRemove" => {
+        "WorktreeRemove" | "WorktreeCreate" => {
             sqlx::query(
                 "INSERT INTO worktree_event_details (event_id, worktree_path) VALUES (?, ?)",
             )
@@ -1731,7 +1731,7 @@ pub async fn fetch_event_detail(
                 })
             }))
         }
-        "WorktreeRemove" => {
+        "WorktreeRemove" | "WorktreeCreate" => {
             let row =
                 sqlx::query("SELECT worktree_path FROM worktree_event_details WHERE event_id = ?")
                     .bind(event_id)

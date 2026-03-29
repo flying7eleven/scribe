@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 /// Hook events and whether they support the `matcher` field.
-/// Ordered canonically per the plan (PreToolUse through TaskCompleted).
-/// WorktreeCreate is intentionally excluded.
+/// Ordered canonically (PreToolUse through WorktreeCreate).
 const HOOK_EVENTS: &[(&str, bool)] = &[
     ("PreToolUse", true),
     ("PostToolUse", true),
@@ -30,6 +29,7 @@ const HOOK_EVENTS: &[(&str, bool)] = &[
     ("TaskCreated", false),
     ("CwdChanged", false),
     ("FileChanged", true),
+    ("WorktreeCreate", false),
 ];
 
 pub enum OutputTarget {
@@ -202,17 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn test_all_24_events_present() {
+    fn test_all_25_events_present() {
         let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
-        assert_eq!(hooks.len(), 24);
-    }
-
-    #[test]
-    fn test_no_worktree_create() {
-        let config = generate_hooks_config(false);
-        let hooks = config["hooks"].as_object().unwrap();
-        assert!(!hooks.contains_key("WorktreeCreate"));
+        assert_eq!(hooks.len(), 25);
     }
 
     #[test]
@@ -319,7 +312,7 @@ mod tests {
         assert!(path.exists());
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
     }
 
     #[test]
@@ -338,7 +331,7 @@ mod tests {
         // Non-hooks keys preserved
         assert!(content["permissions"]["allow"].is_array());
         // Hooks added
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
     }
 
     #[test]
@@ -346,7 +339,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        // Existing file with a custom event hook (not in scribe's 21)
+        // Existing file with a custom event hook on an event scribe also registers
         std::fs::write(
             &path,
             r#"{"hooks":{"WorktreeCreate":[{"hooks":[{"type":"command","command":"my-worktree-handler"}]}]}}"#,
@@ -359,11 +352,12 @@ mod tests {
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
-        // WorktreeCreate preserved (not in scribe's list)
-        assert!(hooks.contains_key("WorktreeCreate"));
-        // Scribe's 21 events added
-        assert!(hooks.contains_key("PreToolUse"));
-        assert_eq!(hooks.len(), 25); // 24 scribe + 1 custom
+        // WorktreeCreate has both user hook and scribe hook
+        let wc_entries = hooks["WorktreeCreate"].as_array().unwrap();
+        assert_eq!(wc_entries.len(), 2); // user + scribe
+        assert_eq!(wc_entries[0]["hooks"][0]["command"].as_str(), Some("my-worktree-handler"));
+        assert_eq!(wc_entries[1]["hooks"][0]["command"].as_str(), Some("scribe log"));
+        assert_eq!(hooks.len(), 25); // all 25 scribe events
     }
 
     #[test]
@@ -474,7 +468,7 @@ mod tests {
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
     }
 
     // ── Guard registration tests (US-0036) ──

@@ -357,6 +357,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_event_worktree_create() {
+        let (pool, _dir) = setup_db().await;
+        let row = insert_and_get(&pool, r#"{"session_id":"s1","hook_event_name":"WorktreeCreate","cwd":"/tmp","worktree_path":"/worktree/feature-x"}"#).await;
+        assert_eq!(row.get::<String, _>("event_type"), "WorktreeCreate");
+    }
+
+    #[tokio::test]
     async fn test_event_file_changed() {
         let (pool, _dir) = setup_db().await;
         let row = insert_and_get(&pool, r#"{"session_id":"s1","hook_event_name":"FileChanged","cwd":"/project"}"#).await;

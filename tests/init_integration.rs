@@ -20,13 +20,13 @@ fn test_init_stdout_valid_json() {
 }
 
 #[test]
-fn test_init_stdout_all_24_events() {
+fn test_init_stdout_all_25_events() {
     let output = scribe_bin().arg("init").output().unwrap();
     let config: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
     let hooks = config["hooks"].as_object().unwrap();
-    assert_eq!(hooks.len(), 24);
-    assert!(!hooks.contains_key("WorktreeCreate"));
+    assert_eq!(hooks.len(), 25);
+    assert!(hooks.contains_key("WorktreeCreate"));
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn test_init_project_creates_file() {
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
 
     // Confirmation on stderr
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -106,7 +106,7 @@ fn test_init_global_creates_file() {
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
 }
 
 // ── Merge tests ──
@@ -134,7 +134,7 @@ fn test_init_project_preserves_existing_keys() {
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert!(content["permissions"]["allow"].is_array());
-    assert_eq!(content["hooks"].as_object().unwrap().len(), 24);
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
 }
 
 #[test]
@@ -159,7 +159,10 @@ fn test_init_project_preserves_non_scribe_events() {
             .unwrap();
     let hooks = content["hooks"].as_object().unwrap();
     assert!(hooks.contains_key("WorktreeCreate"));
-    assert_eq!(hooks.len(), 25); // 24 scribe + 1 custom
+    // WorktreeCreate has both user hook + scribe hook
+    let wc = hooks["WorktreeCreate"].as_array().unwrap();
+    assert_eq!(wc.len(), 2);
+    assert_eq!(hooks.len(), 25); // all 25 scribe events
 }
 
 #[test]

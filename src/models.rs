@@ -281,6 +281,15 @@ mod tests {
     }
 
     #[test]
+    fn test_worktree_create() {
+        let h = parse(
+            r#"{"session_id":"s1","hook_event_name":"WorktreeCreate","cwd":"/tmp","worktree_path":"/worktree/feature-x"}"#,
+        );
+        assert_eq!(h.hook_event_name, "WorktreeCreate");
+        assert_eq!(h.worktree_path.as_deref(), Some("/worktree/feature-x"));
+    }
+
+    #[test]
     fn test_file_changed() {
         let h = parse(
             r#"{"session_id":"s1","hook_event_name":"FileChanged","cwd":"/project"}"#,
