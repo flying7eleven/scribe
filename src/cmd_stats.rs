@@ -25,7 +25,6 @@ struct StatsJson {
     top_directories: Vec<db::DirCount>,
     daily_activity: Vec<DailyActivityEntry>,
     sessions_by_model: Vec<db::ModelSessionCount>,
-    tool_failures: Vec<db::ToolFailureCount>,
 }
 
 #[derive(Serialize)]
@@ -62,7 +61,6 @@ pub async fn run(
     let activity = db::daily_activity(pool, since_ref).await?;
     let filled = fill_zero_days(&activity);
     let models = db::sessions_by_model(pool, since_ref).await?;
-    let tool_failures = db::tool_failures_by_error(pool, since_ref).await?;
 
     if json {
         return run_json(
@@ -75,7 +73,6 @@ pub async fn run(
             dirs,
             &filled,
             models,
-            tool_failures,
         );
     }
 
@@ -90,7 +87,6 @@ pub async fn run(
         &dirs,
         &filled,
         &models,
-        &tool_failures,
     )
 }
 
@@ -106,7 +102,6 @@ fn run_json(
     dirs: Vec<db::DirCount>,
     filled: &[(String, i64)],
     models: Vec<db::ModelSessionCount>,
-    tool_failures: Vec<db::ToolFailureCount>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
@@ -136,7 +131,6 @@ fn run_json(
         top_directories: dirs,
         daily_activity,
         sessions_by_model: models,
-        tool_failures,
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -156,7 +150,6 @@ fn run_text(
     dirs: &[db::DirCount],
     filled: &[(String, i64)],
     models: &[db::ModelSessionCount],
-    tool_failures: &[db::ToolFailureCount],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
@@ -264,23 +257,6 @@ fn run_text(
                 "  {:<30} {:>width$}",
                 m.model,
                 format_count(m.session_count),
-                width = count_width
-            );
-        }
-    }
-
-    // ── Tool failures ──
-    if !tool_failures.is_empty() {
-        println!();
-        println!("Tool failures:");
-        let max_count = tool_failures.iter().map(|t| t.count).max().unwrap_or(0);
-        let count_width = format_count(max_count).len();
-        for tf in tool_failures {
-            println!(
-                "  {:<20} {:<20} {:>width$}",
-                tf.tool_name,
-                tf.error,
-                format_count(tf.count),
                 width = count_width
             );
         }
