@@ -262,10 +262,19 @@ fn draw_events_tab(frame: &mut Frame, app: &App, area: Rect) {
     if has_detail {
         if let Some(idx) = ev.expanded {
             if let Some(event) = ev.events.get(idx) {
-                let detail_lines = match ev.detail_mode {
+                let mut detail_lines = match ev.detail_mode {
                     DetailMode::Structured => events::format_structured_detail(event),
                     DetailMode::RawJson => events::format_raw_json(event),
                 };
+
+                // Append event-type-specific detail fields in Structured mode
+                if ev.detail_mode == DetailMode::Structured {
+                    if let Some((cached_id, Some(ref detail))) = &ev.cached_detail {
+                        if *cached_id == event.id {
+                            detail_lines.extend(events::format_detail_lines(detail));
+                        }
+                    }
+                }
 
                 let mode_label = match ev.detail_mode {
                     DetailMode::Structured => "Structured",

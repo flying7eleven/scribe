@@ -16,6 +16,8 @@ pub struct EventsState {
     pub detail_mode: DetailMode,
     pub session_filter: Option<String>,
     pub loaded: bool,
+    /// Cached detail for the currently expanded event: (event_id, detail).
+    pub cached_detail: Option<(i64, Option<db::EventDetail>)>,
 }
 
 impl EventsState {
@@ -27,6 +29,7 @@ impl EventsState {
             detail_mode: DetailMode::Structured,
             session_filter: None,
             loaded: false,
+            cached_detail: None,
         }
     }
 
@@ -60,6 +63,7 @@ impl EventsState {
         self.selected = (self.selected + 1) % self.events.len();
         // Collapse detail when moving
         self.expanded = None;
+        self.cached_detail = None;
     }
 
     /// Move selection up (wraps).
@@ -69,12 +73,14 @@ impl EventsState {
         }
         self.selected = (self.selected + self.events.len() - 1) % self.events.len();
         self.expanded = None;
+        self.cached_detail = None;
     }
 
     /// Jump to top.
     pub fn top(&mut self) {
         self.selected = 0;
         self.expanded = None;
+        self.cached_detail = None;
     }
 
     /// Jump to bottom.
@@ -83,17 +89,23 @@ impl EventsState {
             self.selected = self.events.len() - 1;
         }
         self.expanded = None;
+        self.cached_detail = None;
     }
 
     /// Toggle expand/collapse on the selected row.
-    pub fn toggle_expand(&mut self) {
+    /// Returns `true` if an event was newly expanded (caller should fetch detail).
+    pub fn toggle_expand(&mut self) -> bool {
         if self.events.is_empty() {
-            return;
+            return false;
         }
         if self.expanded == Some(self.selected) {
             self.expanded = None;
+            self.cached_detail = None;
+            false
         } else {
             self.expanded = Some(self.selected);
+            self.cached_detail = None;
+            true
         }
     }
 
@@ -110,6 +122,7 @@ impl EventsState {
         self.session_filter = None;
         self.loaded = false;
         self.expanded = None;
+        self.cached_detail = None;
     }
 
     /// Set session filter (from Sessions tab drill-down).
@@ -117,6 +130,7 @@ impl EventsState {
         self.session_filter = Some(session_id);
         self.loaded = false;
         self.expanded = None;
+        self.cached_detail = None;
     }
 }
 
@@ -153,6 +167,163 @@ pub fn format_structured_detail(event: &EventRow) -> Vec<String> {
     }
 
     lines
+}
+
+/// Truncate a string to max_len chars, appending "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+/// Format event-type-specific detail fields as display lines.
+/// Only non-None fields are included.
+pub fn format_detail_lines(detail: &db::EventDetail) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push("  ── Detail ──".to_string());
+    match detail {
+        db::EventDetail::Tool(t) => {
+            if let Some(ref v) = t.tool_use_id {
+                lines.push(format!("  Tool Use ID:   {v}"));
+            }
+            if let Some(ref v) = t.error {
+                lines.push(format!("  Error:         {v}"));
+            }
+            if let Some(ref v) = t.error_details {
+                lines.push(format!("  Error Details: {v}"));
+            }
+            if let Some(v) = t.is_interrupt {
+                lines.push(format!("  Is Interrupt:  {v}"));
+            }
+            if let Some(ref v) = t.permission_suggestions {
+                lines.push(format!("  Permissions:   {v}"));
+            }
+        }
+        db::EventDetail::Stop(s) => {
+            format_stop_lines(&mut lines, s);
+        }
+        db::EventDetail::Session(s) => {
+            if let Some(ref v) = s.source {
+                lines.push(format!("  Source:        {v}"));
+            }
+            if let Some(ref v) = s.model {
+                lines.push(format!("  Model:         {v}"));
+            }
+            if let Some(ref v) = s.reason {
+                lines.push(format!("  Reason:        {v}"));
+            }
+            if let Some(ref v) = s.file_path {
+                lines.push(format!("  File Path:     {v}"));
+            }
+        }
+        db::EventDetail::Agent(a) => {
+            format_agent_lines(&mut lines, a);
+        }
+        db::EventDetail::Notification(n) => {
+            if let Some(ref v) = n.notification_type {
+                lines.push(format!("  Type:          {v}"));
+            }
+            if let Some(ref v) = n.title {
+                lines.push(format!("  Title:         {v}"));
+            }
+            if let Some(ref v) = n.message {
+                lines.push(format!("  Message:       {v}"));
+            }
+            if let Some(ref v) = n.elicitation_id {
+                lines.push(format!("  Elicitation:   {v}"));
+            }
+            if let Some(ref v) = n.mcp_server_name {
+                lines.push(format!("  MCP Server:    {v}"));
+            }
+            if let Some(ref v) = n.mode {
+                lines.push(format!("  Mode:          {v}"));
+            }
+            if let Some(ref v) = n.url {
+                lines.push(format!("  URL:           {v}"));
+            }
+            if let Some(ref v) = n.action {
+                lines.push(format!("  Action:        {v}"));
+            }
+        }
+        db::EventDetail::Compact(c) => {
+            if let Some(ref v) = c.trigger {
+                lines.push(format!("  Trigger:       {v}"));
+            }
+            if let Some(ref v) = c.custom_instructions {
+                lines.push(format!("  Custom Instr:  {}", truncate_str(v, 200)));
+            }
+            if let Some(ref v) = c.compact_summary {
+                lines.push(format!("  Summary:       {}", truncate_str(v, 200)));
+            }
+        }
+        db::EventDetail::Instruction(i) => {
+            if let Some(ref v) = i.file_path {
+                lines.push(format!("  File Path:     {v}"));
+            }
+            if let Some(ref v) = i.memory_type {
+                lines.push(format!("  Memory Type:   {v}"));
+            }
+            if let Some(ref v) = i.load_reason {
+                lines.push(format!("  Load Reason:   {v}"));
+            }
+        }
+        db::EventDetail::Team(t) => {
+            if let Some(ref v) = t.teammate_name {
+                lines.push(format!("  Teammate:      {v}"));
+            }
+            if let Some(ref v) = t.team_name {
+                lines.push(format!("  Team:          {v}"));
+            }
+            if let Some(ref v) = t.task_id {
+                lines.push(format!("  Task ID:       {v}"));
+            }
+        }
+        db::EventDetail::Prompt(p) => {
+            if let Some(ref v) = p.prompt {
+                lines.push(format!("  Prompt:        {}", truncate_str(v, 500)));
+            }
+        }
+        db::EventDetail::Worktree(w) => {
+            if let Some(ref v) = w.worktree_path {
+                lines.push(format!("  Worktree:      {v}"));
+            }
+        }
+        db::EventDetail::StopAgent(stop, agent) => {
+            format_stop_lines(&mut lines, stop);
+            format_agent_lines(&mut lines, agent);
+        }
+    }
+    lines
+}
+
+fn format_stop_lines(lines: &mut Vec<String>, s: &db::StopEventDetail) {
+    if let Some(v) = s.stop_hook_active {
+        lines.push(format!("  Hook Active:   {v}"));
+    }
+    if let Some(ref v) = s.last_assistant_message {
+        lines.push(format!("  Last Message:  {}", truncate_str(v, 200)));
+    }
+    if let Some(ref v) = s.error {
+        lines.push(format!("  Error:         {v}"));
+    }
+    if let Some(ref v) = s.error_details {
+        lines.push(format!("  Error Details: {v}"));
+    }
+}
+
+fn format_agent_lines(lines: &mut Vec<String>, a: &db::AgentEventDetail) {
+    if let Some(ref v) = a.agent_id {
+        lines.push(format!("  Agent ID:      {v}"));
+    }
+    if let Some(ref v) = a.agent_type {
+        lines.push(format!("  Agent Type:    {v}"));
+    }
+    if let Some(ref v) = a.agent_transcript_path {
+        lines.push(format!("  Transcript:    {v}"));
+    }
 }
 
 /// Format raw_payload as pretty-printed JSON lines.

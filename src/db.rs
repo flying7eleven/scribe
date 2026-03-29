@@ -1422,6 +1422,303 @@ pub async fn tool_failures_by_error(
     Ok(results)
 }
 
+// ── Event detail structs (E010 TUI enhancement) ──
+
+#[derive(Debug)]
+pub struct ToolEventDetail {
+    pub tool_use_id: Option<String>,
+    pub error: Option<String>,
+    pub error_details: Option<String>,
+    pub is_interrupt: Option<bool>,
+    pub permission_suggestions: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct StopEventDetail {
+    pub stop_hook_active: Option<bool>,
+    pub last_assistant_message: Option<String>,
+    pub error: Option<String>,
+    pub error_details: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct SessionEventDetail {
+    pub source: Option<String>,
+    pub model: Option<String>,
+    pub reason: Option<String>,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct AgentEventDetail {
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_transcript_path: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct NotificationEventDetail {
+    pub notification_type: Option<String>,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub elicitation_id: Option<String>,
+    pub mcp_server_name: Option<String>,
+    pub mode: Option<String>,
+    pub url: Option<String>,
+    pub action: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct CompactEventDetail {
+    pub trigger: Option<String>,
+    pub custom_instructions: Option<String>,
+    pub compact_summary: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct InstructionEventDetail {
+    pub file_path: Option<String>,
+    pub memory_type: Option<String>,
+    pub load_reason: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct TeamEventDetail {
+    pub teammate_name: Option<String>,
+    pub team_name: Option<String>,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct PromptEventDetail {
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct WorktreeEventDetail {
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum EventDetail {
+    Tool(ToolEventDetail),
+    Stop(StopEventDetail),
+    Session(SessionEventDetail),
+    Agent(AgentEventDetail),
+    Notification(NotificationEventDetail),
+    Compact(CompactEventDetail),
+    Instruction(InstructionEventDetail),
+    Team(TeamEventDetail),
+    Prompt(PromptEventDetail),
+    Worktree(WorktreeEventDetail),
+    /// SubagentStop: merged from stop + agent detail tables
+    StopAgent(StopEventDetail, AgentEventDetail),
+}
+
+/// Fetch event-type-specific detail data from the appropriate detail table.
+pub async fn fetch_event_detail(
+    pool: &SqlitePool,
+    event_id: i64,
+    event_type: &str,
+) -> Result<Option<EventDetail>, Box<dyn std::error::Error>> {
+    match event_type {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+            let row = sqlx::query(
+                "SELECT tool_use_id, error, error_details, is_interrupt, permission_suggestions FROM tool_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Tool(ToolEventDetail {
+                    tool_use_id: r.get("tool_use_id"),
+                    error: r.get("error"),
+                    error_details: r.get("error_details"),
+                    is_interrupt: r.get::<Option<bool>, _>("is_interrupt"),
+                    permission_suggestions: r.get("permission_suggestions"),
+                })
+            }))
+        }
+        "Stop" | "StopFailure" => {
+            let row = sqlx::query(
+                "SELECT stop_hook_active, last_assistant_message, error, error_details FROM stop_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Stop(StopEventDetail {
+                    stop_hook_active: r.get::<Option<bool>, _>("stop_hook_active"),
+                    last_assistant_message: r.get("last_assistant_message"),
+                    error: r.get("error"),
+                    error_details: r.get("error_details"),
+                })
+            }))
+        }
+        "SubagentStop" => {
+            let stop_row = sqlx::query(
+                "SELECT stop_hook_active, last_assistant_message, error, error_details FROM stop_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            let agent_row = sqlx::query(
+                "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            match (stop_row, agent_row) {
+                (Some(sr), Some(ar)) => Ok(Some(EventDetail::StopAgent(
+                    StopEventDetail {
+                        stop_hook_active: sr.get::<Option<bool>, _>("stop_hook_active"),
+                        last_assistant_message: sr.get("last_assistant_message"),
+                        error: sr.get("error"),
+                        error_details: sr.get("error_details"),
+                    },
+                    AgentEventDetail {
+                        agent_id: ar.get("agent_id"),
+                        agent_type: ar.get("agent_type"),
+                        agent_transcript_path: ar.get("agent_transcript_path"),
+                    },
+                ))),
+                (Some(sr), None) => Ok(Some(EventDetail::Stop(StopEventDetail {
+                    stop_hook_active: sr.get::<Option<bool>, _>("stop_hook_active"),
+                    last_assistant_message: sr.get("last_assistant_message"),
+                    error: sr.get("error"),
+                    error_details: sr.get("error_details"),
+                }))),
+                (None, Some(ar)) => Ok(Some(EventDetail::Agent(AgentEventDetail {
+                    agent_id: ar.get("agent_id"),
+                    agent_type: ar.get("agent_type"),
+                    agent_transcript_path: ar.get("agent_transcript_path"),
+                }))),
+                (None, None) => Ok(None),
+            }
+        }
+        "SubagentStart" => {
+            let row = sqlx::query(
+                "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Agent(AgentEventDetail {
+                    agent_id: r.get("agent_id"),
+                    agent_type: r.get("agent_type"),
+                    agent_transcript_path: r.get("agent_transcript_path"),
+                })
+            }))
+        }
+        "SessionStart" | "SessionEnd" | "ConfigChange" => {
+            let row = sqlx::query(
+                "SELECT source, model, reason, file_path FROM session_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Session(SessionEventDetail {
+                    source: r.get("source"),
+                    model: r.get("model"),
+                    reason: r.get("reason"),
+                    file_path: r.get("file_path"),
+                })
+            }))
+        }
+        "Notification" | "Elicitation" | "ElicitationResult" => {
+            let row = sqlx::query(
+                "SELECT notification_type, title, message, elicitation_id, mcp_server_name, mode, url, action FROM notification_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Notification(NotificationEventDetail {
+                    notification_type: r.get("notification_type"),
+                    title: r.get("title"),
+                    message: r.get("message"),
+                    elicitation_id: r.get("elicitation_id"),
+                    mcp_server_name: r.get("mcp_server_name"),
+                    mode: r.get("mode"),
+                    url: r.get("url"),
+                    action: r.get("action"),
+                })
+            }))
+        }
+        "PreCompact" | "PostCompact" => {
+            let row = sqlx::query(
+                "SELECT `trigger`, custom_instructions, compact_summary FROM compact_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Compact(CompactEventDetail {
+                    trigger: r.get("trigger"),
+                    custom_instructions: r.get("custom_instructions"),
+                    compact_summary: r.get("compact_summary"),
+                })
+            }))
+        }
+        "InstructionsLoaded" => {
+            let row = sqlx::query(
+                "SELECT file_path, memory_type, load_reason FROM instruction_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Instruction(InstructionEventDetail {
+                    file_path: r.get("file_path"),
+                    memory_type: r.get("memory_type"),
+                    load_reason: r.get("load_reason"),
+                })
+            }))
+        }
+        "TeammateIdle" | "TaskCompleted" => {
+            let row = sqlx::query(
+                "SELECT teammate_name, team_name, task_id FROM team_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(row.map(|r| {
+                EventDetail::Team(TeamEventDetail {
+                    teammate_name: r.get("teammate_name"),
+                    team_name: r.get("team_name"),
+                    task_id: r.get("task_id"),
+                })
+            }))
+        }
+        "UserPromptSubmit" => {
+            let row = sqlx::query("SELECT prompt FROM prompt_event_details WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_optional(pool)
+                .await?;
+            Ok(row.map(|r| {
+                EventDetail::Prompt(PromptEventDetail {
+                    prompt: r.get("prompt"),
+                })
+            }))
+        }
+        "WorktreeRemove" => {
+            let row =
+                sqlx::query("SELECT worktree_path FROM worktree_event_details WHERE event_id = ?")
+                    .bind(event_id)
+                    .fetch_optional(pool)
+                    .await?;
+            Ok(row.map(|r| {
+                EventDetail::Worktree(WorktreeEventDetail {
+                    worktree_path: r.get("worktree_path"),
+                })
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3335,5 +3632,134 @@ mod tests {
         assert_eq!(summary.stop_failure_types.len(), 1);
         assert_eq!(summary.stop_failure_types[0].error_type, "context_limit");
         assert_eq!(summary.stop_failure_types[0].count, 2);
+    }
+
+    // ── fetch_event_detail tests (US-0044) ──
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_tool() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "PreToolUse".into(),
+            cwd: "/tmp".into(),
+            tool_name: Some("Bash".into()),
+            tool_use_id: Some("tu-001".into()),
+            ..Default::default()
+        };
+        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let detail = fetch_event_detail(&pool, id, "PreToolUse").await.unwrap();
+        assert!(detail.is_some());
+        match detail.unwrap() {
+            EventDetail::Tool(t) => {
+                assert_eq!(t.tool_use_id.as_deref(), Some("tu-001"));
+                assert!(t.error.is_none());
+            }
+            other => panic!("expected Tool variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_stop_failure() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "StopFailure".into(),
+            cwd: "/tmp".into(),
+            error: Some("rate_limit".into()),
+            error_details: Some("exceeded quota".into()),
+            stop_hook_active: Some(true),
+            ..Default::default()
+        };
+        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let detail = fetch_event_detail(&pool, id, "StopFailure").await.unwrap();
+        assert!(detail.is_some());
+        match detail.unwrap() {
+            EventDetail::Stop(s) => {
+                assert_eq!(s.stop_hook_active, Some(true));
+                assert_eq!(s.error.as_deref(), Some("rate_limit"));
+                assert_eq!(s.error_details.as_deref(), Some("exceeded quota"));
+            }
+            other => panic!("expected Stop variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_subagent_stop_dual() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SubagentStop".into(),
+            cwd: "/tmp".into(),
+            stop_hook_active: Some(true),
+            last_assistant_message: Some("Done.".into()),
+            agent_id: Some("agent-789".into()),
+            agent_type: Some("inner".into()),
+            agent_transcript_path: Some("/tmp/transcript.json".into()),
+            ..Default::default()
+        };
+        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let detail = fetch_event_detail(&pool, id, "SubagentStop").await.unwrap();
+        assert!(detail.is_some());
+        match detail.unwrap() {
+            EventDetail::StopAgent(stop, agent) => {
+                assert_eq!(stop.stop_hook_active, Some(true));
+                assert_eq!(stop.last_assistant_message.as_deref(), Some("Done."));
+                assert_eq!(agent.agent_id.as_deref(), Some("agent-789"));
+                assert_eq!(agent.agent_type.as_deref(), Some("inner"));
+                assert_eq!(
+                    agent.agent_transcript_path.as_deref(),
+                    Some("/tmp/transcript.json")
+                );
+            }
+            other => panic!("expected StopAgent variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_missing() {
+        let (pool, _dir) = setup_detail_db().await;
+        // Query for non-existent event_id
+        let detail = fetch_event_detail(&pool, 99999, "PreToolUse")
+            .await
+            .unwrap();
+        assert!(detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_session() {
+        let (pool, _dir) = setup_detail_db().await;
+        let hook = crate::models::HookInput {
+            session_id: "s1".into(),
+            hook_event_name: "SessionStart".into(),
+            cwd: "/tmp".into(),
+            source: Some("startup".into()),
+            model: Some("claude-sonnet-4-20250514".into()),
+            ..Default::default()
+        };
+        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+
+        let detail = fetch_event_detail(&pool, id, "SessionStart").await.unwrap();
+        assert!(detail.is_some());
+        match detail.unwrap() {
+            EventDetail::Session(s) => {
+                assert_eq!(s.source.as_deref(), Some("startup"));
+                assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-20250514"));
+                assert!(s.reason.is_none());
+            }
+            other => panic!("expected Session variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_event_detail_unknown_type() {
+        let (pool, _dir) = setup_detail_db().await;
+        let detail = fetch_event_detail(&pool, 1, "SomeUnknownType")
+            .await
+            .unwrap();
+        assert!(detail.is_none());
     }
 }

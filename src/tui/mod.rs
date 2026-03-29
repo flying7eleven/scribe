@@ -128,7 +128,25 @@ pub async fn run(
                     // Tab-specific keybindings
                     _ => match app.active_tab {
                         Tab::Sessions => handle_sessions_key(&mut app, key.code),
-                        Tab::Events => handle_events_key(&mut app, key.code),
+                        Tab::Events => {
+                            handle_events_key(&mut app, key.code);
+                            // Fetch detail for newly expanded event
+                            if let Some(idx) = app.events.expanded {
+                                if app.events.cached_detail.is_none() {
+                                    if let Some(event) = app.events.events.get(idx) {
+                                        let detail = crate::db::fetch_event_detail(
+                                            pool,
+                                            event.id,
+                                            &event.event_type,
+                                        )
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                        app.events.cached_detail = Some((event.id, detail));
+                                    }
+                                }
+                            }
+                        }
                         Tab::Stats => handle_stats_key(&mut app, key.code),
                         Tab::Live => handle_live_key(&mut app, key.code),
                         Tab::Policy => handle_policy_key(&mut app, key.code),
@@ -184,10 +202,13 @@ fn handle_events_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.events.prev(),
         KeyCode::Char('g') => app.events.top(),
         KeyCode::Char('G') => app.events.bottom(),
-        KeyCode::Enter => app.events.toggle_expand(),
+        KeyCode::Enter => {
+            app.events.toggle_expand();
+        }
         KeyCode::Esc => {
             if app.events.expanded.is_some() {
                 app.events.expanded = None;
+                app.events.cached_detail = None;
             } else if app.events.session_filter.is_some() {
                 app.events.clear_session_filter();
             }
