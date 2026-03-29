@@ -19,6 +19,8 @@ struct StatsJson {
     oldest_event: Option<String>,
     newest_event: Option<String>,
     avg_session_duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_session_duration_seconds: Option<f64>,
     top_tools: Vec<db::ToolCount>,
     event_types: Vec<db::EventTypeCount>,
     errors: ErrorsJson,
@@ -46,14 +48,24 @@ pub async fn run(
     db_path: &str,
     since: Option<&str>,
     json: bool,
+    max_session_duration: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve --since to ISO 8601 UTC timestamp
     let resolved_since = since.map(cmd_query::parse_time_spec).transpose()?;
     let since_ref = resolved_since.as_deref();
 
+    // Parse max_session_duration config (humantime duration string -> seconds)
+    let max_dur_secs = max_session_duration
+        .map(|s| {
+            humantime::parse_duration(s)
+                .map(|d| d.as_secs_f64())
+                .map_err(|e| format!("invalid max_session_duration '{s}': {e}"))
+        })
+        .transpose()?;
+
     // Gather all stats
     let stats = db::get_stats(pool, since_ref).await?;
-    let avg_dur = db::avg_session_duration(pool, since_ref).await?;
+    let avg_dur = db::avg_session_duration(pool, since_ref, max_dur_secs).await?;
     let tools = db::top_tools(pool, since_ref, 10).await?;
     let event_types = db::event_type_breakdown(pool, since_ref).await?;
     let errors = db::error_summary(pool, since_ref).await?;
@@ -73,6 +85,7 @@ pub async fn run(
             dirs,
             &filled,
             models,
+            max_dur_secs,
         );
     }
 
@@ -87,6 +100,7 @@ pub async fn run(
         &dirs,
         &filled,
         &models,
+        max_session_duration,
     )
 }
 
@@ -102,6 +116,7 @@ fn run_json(
     dirs: Vec<db::DirCount>,
     filled: &[(String, i64)],
     models: Vec<db::ModelSessionCount>,
+    max_session_duration_seconds: Option<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
@@ -121,6 +136,7 @@ fn run_json(
         oldest_event: stats.oldest_event.clone(),
         newest_event: stats.newest_event.clone(),
         avg_session_duration_seconds: avg_dur,
+        max_session_duration_seconds,
         top_tools: tools,
         event_types,
         errors: ErrorsJson {
@@ -150,6 +166,7 @@ fn run_text(
     dirs: &[db::DirCount],
     filled: &[(String, i64)],
     models: &[db::ModelSessionCount],
+    max_session_duration: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
@@ -177,7 +194,11 @@ fn run_text(
     println!("Sessions:  {}", format_count(stats.session_count));
 
     if let Some(avg) = avg_dur {
-        println!("Avg duration:  {}", format_duration(avg));
+        if let Some(cap) = max_session_duration {
+            println!("Avg duration:  {}  (cap: {cap})", format_duration(avg));
+        } else {
+            println!("Avg duration:  {}", format_duration(avg));
+        }
     }
 
     println!("Oldest:    {oldest}");

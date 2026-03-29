@@ -827,24 +827,31 @@ pub async fn top_directories(
 }
 
 /// Get average session duration in seconds, excluding single-event sessions.
+/// When `max_duration_seconds` is set, sessions longer than the cap are excluded.
 /// Returns `None` if no qualifying sessions exist.
 pub async fn avg_session_duration(
     pool: &SqlitePool,
     since: Option<&str>,
+    max_duration_seconds: Option<f64>,
 ) -> Result<Option<f64>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
         "SELECT AVG((julianday(last_seen) - julianday(first_seen)) * 86400) as avg_seconds FROM sessions WHERE first_seen != last_seen",
     );
-    let mut binds: Vec<String> = Vec::new();
 
-    if let Some(since) = since {
+    if since.is_some() {
         sql.push_str(" AND last_seen >= ?");
-        binds.push(since.to_string());
+    }
+
+    if max_duration_seconds.is_some() {
+        sql.push_str(" AND (julianday(last_seen) - julianday(first_seen)) * 86400 <= ?");
     }
 
     let mut query = sqlx::query(&sql);
-    for bind in &binds {
-        query = query.bind(bind);
+    if let Some(since) = since {
+        query = query.bind(since);
+    }
+    if let Some(max_secs) = max_duration_seconds {
+        query = query.bind(max_secs);
     }
 
     let row = query.fetch_one(pool).await?;
@@ -2742,7 +2749,7 @@ mod tests {
     #[tokio::test]
     async fn test_avg_session_duration_normal() {
         let (pool, _dir) = setup_stats_db().await;
-        let avg = avg_session_duration(&pool, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None).await.unwrap();
         assert!(avg.is_some());
         let avg = avg.unwrap();
         // s1: 2025-01-10T10:00 to 2025-01-11T09:00 = 23 hours = 82800s
@@ -2765,7 +2772,7 @@ mod tests {
         .await
         .unwrap();
 
-        let avg = avg_session_duration(&pool, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None).await.unwrap();
         assert!(avg.is_none());
     }
 
@@ -2775,7 +2782,7 @@ mod tests {
         let db_path = dir.path().join("no_sessions.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
-        let avg = avg_session_duration(&pool, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None).await.unwrap();
         assert!(avg.is_none());
     }
 
@@ -2783,12 +2790,34 @@ mod tests {
     async fn test_avg_session_duration_with_since() {
         let (pool, _dir) = setup_stats_db().await;
         // Only s2 has last_seen >= 2025-01-12
-        let avg = avg_session_duration(&pool, Some("2025-01-12T00:00:00.000Z"))
+        let avg = avg_session_duration(&pool, Some("2025-01-12T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert!(avg.is_some());
         // s2: 1 hour = 3600s
         assert!((avg.unwrap() - 3600.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_with_max_cap() {
+        let (pool, _dir) = setup_stats_db().await;
+        // s1: 23 hours = 82800s, s2: 1 hour = 3600s
+        // Cap at 8 hours (28800s) — only s2 qualifies
+        let avg = avg_session_duration(&pool, None, Some(28800.0))
+            .await
+            .unwrap();
+        assert!(avg.is_some());
+        assert!((avg.unwrap() - 3600.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_avg_session_duration_cap_excludes_all() {
+        let (pool, _dir) = setup_stats_db().await;
+        // Cap at 30 minutes — neither session qualifies
+        let avg = avg_session_duration(&pool, None, Some(1800.0))
+            .await
+            .unwrap();
+        assert!(avg.is_none());
     }
 
     #[tokio::test]

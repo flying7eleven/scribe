@@ -363,7 +363,15 @@ async fn main() {
             }
         }
         Commands::Stats { since, json } => {
-            if let Err(e) = cmd_stats::run(&pool, &db_path, since.as_deref(), json).await {
+            if let Err(e) = cmd_stats::run(
+                &pool,
+                &db_path,
+                since.as_deref(),
+                json,
+                config.max_session_duration.as_deref(),
+            )
+            .await
+            {
                 eprintln!("scribe: stats error: {e}");
                 std::process::exit(1);
             }

@@ -25,6 +25,12 @@ pub const CONFIG_TEMPLATE: &str = "\
 # Can be overridden with --limit.
 # Default: 50
 # default_query_limit = 50
+
+# Maximum session duration for stats. Sessions longer than this
+# are considered stale and excluded from average duration.
+# Examples: \"4h\", \"8h\", \"1d\"
+# Default: disabled (all sessions included)
+# max_session_duration = \"8h\"
 ";
 
 #[derive(Deserialize, Default)]
@@ -34,6 +40,7 @@ pub struct Config {
     pub retention: Option<String>,
     pub retention_check_interval: Option<String>,
     pub default_query_limit: Option<i64>,
+    pub max_session_duration: Option<String>,
 }
 
 /// Returns the platform-appropriate config file path.
@@ -487,8 +494,8 @@ default_query_limit = 200
         .unwrap();
 
         let report = migrate_config_at(&path).unwrap().unwrap();
-        // Only retention and retention_check_interval should be added
-        assert_eq!(report.fields_added.len(), 2);
+        // retention, retention_check_interval, and max_session_duration should be added
+        assert_eq!(report.fields_added.len(), 3);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("db_path = \"/my/path.db\""));
@@ -519,7 +526,7 @@ default_query_limit = 200
         std::fs::write(&path, "").unwrap();
 
         let report = migrate_config_at(&path).unwrap().unwrap();
-        assert_eq!(report.fields_added.len(), 4);
+        assert_eq!(report.fields_added.len(), 5);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# db_path ="));
@@ -580,7 +587,7 @@ default_query_limit = 200
         // Mix of active and commented-out fields covering all 4
         std::fs::write(
             &path,
-            "db_path = \"/custom.db\"\n# retention = \"90d\"\n# retention_check_interval = \"12h\"\ndefault_query_limit = 100\n",
+            "db_path = \"/custom.db\"\n# retention = \"90d\"\n# retention_check_interval = \"12h\"\ndefault_query_limit = 100\n# max_session_duration = \"8h\"\n",
         )
         .unwrap();
 
@@ -596,7 +603,7 @@ default_query_limit = 200
         // Config with all known fields plus an unknown one
         std::fs::write(
             &path,
-            "db_path = \"/custom.db\"\nunknown_setting = true\n# retention = \"90d\"\n# retention_check_interval = \"24h\"\n# default_query_limit = 50\n",
+            "db_path = \"/custom.db\"\nunknown_setting = true\n# retention = \"90d\"\n# retention_check_interval = \"24h\"\n# default_query_limit = 50\n# max_session_duration = \"8h\"\n",
         )
         .unwrap();
 

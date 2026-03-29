@@ -50,7 +50,7 @@ impl StatsState {
         since: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.stats = Some(db::get_stats(pool, since).await?);
-        self.avg_duration = db::avg_session_duration(pool, since).await?;
+        self.avg_duration = db::avg_session_duration(pool, since, None).await?;
         self.tools = db::top_tools(pool, since, 10).await?;
         self.event_types = db::event_type_breakdown(pool, since).await?;
         self.errors = Some(db::error_summary(pool, since).await?);
