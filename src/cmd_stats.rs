@@ -262,24 +262,6 @@ fn run_text(
         }
     }
 
-    // ── Top directories ──
-    if !dirs.is_empty() {
-        println!();
-        println!("Top directories:");
-        let max_count = dirs.iter().map(|d| d.count).max().unwrap_or(0);
-        let count_width = format_count(max_count).len();
-        for (i, dir) in dirs.iter().enumerate() {
-            let path = truncate_path(&dir.cwd, 40);
-            println!(
-                "  {:>2}. {:<40} {:>width$}",
-                i + 1,
-                path,
-                format_count(dir.count),
-                width = count_width
-            );
-        }
-    }
-
     // ── Activity histogram ──
     if !filled.is_empty() {
         println!();
@@ -299,6 +281,24 @@ fn run_text(
                 "  {label}  {:<40} {:>width$}",
                 bar,
                 format_count(*count),
+                width = count_width
+            );
+        }
+    }
+
+    // ── Top directories ──
+    if !dirs.is_empty() {
+        println!();
+        println!("Top directories:");
+        let max_count = dirs.iter().map(|d| d.count).max().unwrap_or(0);
+        let count_width = format_count(max_count).len();
+        for (i, dir) in dirs.iter().enumerate() {
+            let path = truncate_path(&dir.cwd, 40);
+            println!(
+                "  {:>2}. {:<40} {:>width$}",
+                i + 1,
+                path,
+                format_count(dir.count),
                 width = count_width
             );
         }
