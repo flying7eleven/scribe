@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-beta3] - 2026-03-29
+
+### Added
+- Add TUI scaffolding with tab navigation, event loop, and format extraction ([a6f49c1])
+- Add Sessions tab with table rendering, navigation, and drill-down ([fa81112])
+- Add Events tab with inline detail and structured/JSON toggle ([0aaf3e8])
+- Add Stats tab with scrollable dashboard mirroring scribe stats ([fb9eb5b])
+- Add Live tab with SQLite polling, ring buffer feed, and auto-scroll ([f137fb6])
+- Add filter bar with real-time client-side filtering for Sessions and Events ([dbd4989])
+- Add TUI event detail enhancement with event-type-specific field display ([5774dad])
+- Add migration for 10 event detail tables with FK cascade and indexes ([8f31c3b])
+- Add Tier 1 detail table ingestion for tool, stop, and session events ([be5baef])
+- Add Tier 2+3 detail table ingestion with SubagentStop dual-insert ([0404cc7])
+- Add scribe backfill command for populating detail tables from raw_payload ([949f9c1])
+- Refactor error_summary to JOIN detail tables and add model/failure query helpers ([308e1e0])
+- Add max_session_duration config to cap stale sessions ([59f0084])
+
+### Changed
+- Reorder stats output — activity before directories ([7c7efb5])
+- Update the README.md ([1a8fa0c])
+
+### Removed
+- Remove verbose tool failures section from scribe stats CLI output ([ee6bf92])
+
+### Fixed
+- Enable PRAGMA foreign_keys for ON DELETE CASCADE support ([e228022])
+
+[a6f49c1]: https://github.com/flying7eleven/scribe/commit/a6f49c19c7952089c7e0b5e000b8fa5b6074da04
+[fa81112]: https://github.com/flying7eleven/scribe/commit/fa81112703e0d114e80e5c9f43c6d58f55784130
+[0aaf3e8]: https://github.com/flying7eleven/scribe/commit/0aaf3e805ac983b8d02556cc8003afd1e6467cf0
+[fb9eb5b]: https://github.com/flying7eleven/scribe/commit/fb9eb5b5f73e951dd8f0f36e423e0fc9b78a0904
+[f137fb6]: https://github.com/flying7eleven/scribe/commit/f137fb6391e85eddd41b87249498332f82454072
+[dbd4989]: https://github.com/flying7eleven/scribe/commit/dbd4989c60385c5f8b4cefede7c1ee019fd730e3
+[5774dad]: https://github.com/flying7eleven/scribe/commit/57749dad07428b3b256f22a618a80146acb30204
+[8f31c3b]: https://github.com/flying7eleven/scribe/commit/8f31c3b5002963a82d62ddd148cbf00819c902c4
+[be5baef]: https://github.com/flying7eleven/scribe/commit/be5baef4838f3f370d7ee7697d853465783f87a3
+[0404cc7]: https://github.com/flying7eleven/scribe/commit/0404cc71e8ee1a9b8d9b76dad409e14f50dd89b6
+[949f9c1]: https://github.com/flying7eleven/scribe/commit/949f9c1e4065b9c585a05d18d35d5e742afa638f
+[308e1e0]: https://github.com/flying7eleven/scribe/commit/308e1e09321018c0affcf397db7b0b110f95e8df
+[59f0084]: https://github.com/flying7eleven/scribe/commit/59f00845a1f1376a3498ad8a9b907feed11ca2af
+[7c7efb5]: https://github.com/flying7eleven/scribe/commit/7c7efb53f99cac574b5f1e68cd503c63a859e65b
+[1a8fa0c]: https://github.com/flying7eleven/scribe/commit/1a8fa0c8b7df477e4d9b4879c0949b8fde34ec4f
+[ee6bf92]: https://github.com/flying7eleven/scribe/commit/ee6bf92f8f1415b2b3f4865c97e8deb4165f363f
+[e228022]: https://github.com/flying7eleven/scribe/commit/e228022e77ef7c3db5dc69168023d5274d6c1598
+
 ## [1.0.0-beta2] - 2026-03-26
 
 ### Added
