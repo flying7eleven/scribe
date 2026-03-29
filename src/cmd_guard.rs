@@ -280,6 +280,7 @@ mod tests {
 
     #[test]
     fn test_invalid_regex_handled() {
+        #[allow(clippy::invalid_regex)]
         let result = Regex::new("[invalid");
         assert!(result.is_err());
     }

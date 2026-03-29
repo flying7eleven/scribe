@@ -358,6 +358,7 @@ pub async fn insert_event(
 
 /// Test helper: construct a minimal `HookInput` from individual fields and insert.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_test_event(
     pool: &SqlitePool,
     session_id: &str,
