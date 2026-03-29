@@ -28,6 +28,7 @@ const HOOK_EVENTS: &[(&str, bool)] = &[
     ("TeammateIdle", false),
     ("TaskCompleted", false),
     ("TaskCreated", false),
+    ("CwdChanged", false),
 ];
 
 pub enum OutputTarget {
@@ -200,10 +201,10 @@ mod tests {
     }
 
     #[test]
-    fn test_all_22_events_present() {
+    fn test_all_23_events_present() {
         let config = generate_hooks_config(false);
         let hooks = config["hooks"].as_object().unwrap();
-        assert_eq!(hooks.len(), 22);
+        assert_eq!(hooks.len(), 23);
     }
 
     #[test]
@@ -317,7 +318,7 @@ mod tests {
         assert!(path.exists());
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 22);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 23);
     }
 
     #[test]
@@ -336,7 +337,7 @@ mod tests {
         // Non-hooks keys preserved
         assert!(content["permissions"]["allow"].is_array());
         // Hooks added
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 22);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 23);
     }
 
     #[test]
@@ -361,7 +362,7 @@ mod tests {
         assert!(hooks.contains_key("WorktreeCreate"));
         // Scribe's 21 events added
         assert!(hooks.contains_key("PreToolUse"));
-        assert_eq!(hooks.len(), 23); // 22 scribe + 1 custom
+        assert_eq!(hooks.len(), 24); // 23 scribe + 1 custom
     }
 
     #[test]
@@ -472,7 +473,7 @@ mod tests {
 
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["hooks"].as_object().unwrap().len(), 22);
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 23);
     }
 
     // ── Guard registration tests (US-0036) ──

@@ -281,6 +281,15 @@ mod tests {
     }
 
     #[test]
+    fn test_cwd_changed() {
+        let h = parse(
+            r#"{"session_id":"s1","hook_event_name":"CwdChanged","cwd":"/new/working/dir"}"#,
+        );
+        assert_eq!(h.hook_event_name, "CwdChanged");
+        assert_eq!(h.cwd, "/new/working/dir");
+    }
+
+    #[test]
     fn test_task_created() {
         let h = parse(
             r#"{"session_id":"s1","hook_event_name":"TaskCreated","cwd":"/tmp","task_id":"t1","task_subject":"implement feature","task_description":"add auth","teammate_name":"bob","team_name":"alpha"}"#,

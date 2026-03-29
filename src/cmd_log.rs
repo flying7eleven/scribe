@@ -357,6 +357,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_event_cwd_changed() {
+        let (pool, _dir) = setup_db().await;
+        let row = insert_and_get(&pool, r#"{"session_id":"s1","hook_event_name":"CwdChanged","cwd":"/new/working/dir"}"#).await;
+        assert_eq!(row.get::<String, _>("event_type"), "CwdChanged");
+        assert_eq!(row.get::<String, _>("cwd"), "/new/working/dir");
+    }
+
+    #[tokio::test]
     async fn test_event_task_created() {
         let (pool, _dir) = setup_db().await;
         let row = insert_and_get(&pool, r#"{"session_id":"s1","hook_event_name":"TaskCreated","cwd":"/tmp","task_id":"t1","task_subject":"implement feature","task_description":"add auth","teammate_name":"bob","team_name":"alpha"}"#).await;
