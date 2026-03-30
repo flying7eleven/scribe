@@ -22,10 +22,12 @@ cargo install --path .
 
 No system dependencies required — SQLite is bundled.
 
-To enable optional policy enforcement (guard feature):
+To enable optional features:
 
 ```bash
-cargo install --path . --features guard
+cargo install --path . --features guard        # Policy enforcement
+cargo install --path . --features sync         # Multi-machine sync
+cargo install --path . --features guard,sync   # Both
 ```
 
 ## Getting Started
@@ -202,6 +204,81 @@ scribe classify --risk dangerous --details
 ```
 
 Guard uses a fail-open design — if scribe encounters an error, the tool call is allowed through so Claude Code is never blocked.
+
+## Sync: Multi-Machine Audit Logs (optional)
+
+When built with `--features sync`, scribe can synchronize audit events between machines over SSH — no server required. Events are end-to-end encrypted using [age](https://age-encryption.org/) X25519 keys.
+
+```bash
+cargo install --path . --features sync
+```
+
+### Setup
+
+Both machines need scribe installed with the sync feature. Generate a keypair on each machine, then exchange public keys:
+
+```bash
+# On each machine: generate a keypair
+scribe sync keypair generate
+
+# Share the printed public key (age1...) with the other machine
+scribe sync keypair show
+
+# Add the other machine's public key
+scribe sync keypair add workstation age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+> **SSH PATH note:** `scribe sync push/pull` invokes `scribe sync import/export` on the
+> remote via a non-interactive SSH session. Non-interactive shells do **not** source
+> `~/.profile` or `~/.bashrc`, so the `scribe` binary must be on the default PATH.
+> If you installed via `cargo install`, add `$HOME/.cargo/bin` to your PATH in a file
+> that is always sourced:
+>
+> - **zsh:** `~/.zshenv`
+> - **bash:** `~/.bashrc` (before any interactive-only guard)
+
+### Push & Pull
+
+```bash
+# Push local events to a remote machine
+scribe sync push user@hostname
+
+# Pull events from a remote machine
+scribe sync pull user@hostname
+
+# Only sync events from the last 7 days
+scribe sync push user@hostname --since 7d
+scribe sync pull user@hostname --since 7d
+```
+
+The `<remote>` argument accepts `user@hostname` or any host alias from your SSH config.
+
+### Sync Status
+
+```bash
+scribe sync status
+```
+
+Shows your local machine ID, configured peers, events pending sync, and a log of recent sync operations.
+
+### `scribe sync keypair`
+
+```bash
+scribe sync keypair generate [--force]   # Generate new keypair (--force to overwrite)
+scribe sync keypair show                 # Print your public key
+scribe sync keypair add <name> <key>     # Add a peer's public key
+scribe sync keypair list                 # List all peers
+scribe sync keypair remove <name>        # Remove a peer
+```
+
+### How it works
+
+Sync uses SSH as transport and age for encryption:
+
+1. **Push:** local `scribe sync export` pipes encrypted event bundles over SSH to `scribe sync import` on the remote
+2. **Pull:** remote `scribe sync export` pipes encrypted event bundles back to local `scribe sync import`
+3. Events are deduplicated on import — syncing the same data twice is safe
+4. Each sync is logged with direction, event counts, and status
 
 ## Hook Events
 
