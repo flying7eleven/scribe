@@ -11,10 +11,10 @@ CREATE TABLE IF NOT EXISTS events (
     raw_payload   TEXT    NOT NULL
 );
 
-CREATE INDEX idx_events_session ON events(session_id);
-CREATE INDEX idx_events_type    ON events(event_type);
-CREATE INDEX idx_events_tool    ON events(tool_name);
-CREATE INDEX idx_events_ts      ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_tool    ON events(tool_name);
+CREATE INDEX IF NOT EXISTS idx_events_ts      ON events(timestamp);
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id    TEXT PRIMARY KEY,
