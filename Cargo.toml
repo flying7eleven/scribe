@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 guard = ["regex"]
 sync = ["age", "hostname"]
+usage = []
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

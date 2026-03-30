@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: ["", "--features guard", "--features sync", "--features guard,sync"]
+        features: ["", "--features guard", "--features sync", "--feature usage", "--features guard,sync,usage"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

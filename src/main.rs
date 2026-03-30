@@ -15,6 +15,7 @@ mod cmd_retain;
 mod cmd_stats;
 #[cfg(feature = "sync")]
 mod cmd_sync;
+#[cfg(feature = "usage")]
 mod cmd_usage;
 mod config;
 mod db;
@@ -108,6 +109,7 @@ enum Commands {
         json: bool,
     },
     /// Estimate token usage for rate limit awareness
+    #[cfg(feature = "usage")]
     Usage {
         /// Time window for primary estimate (e.g. 5h, 3h, 1h)
         #[arg(long, default_value = "5h")]
@@ -406,6 +408,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "usage")]
         Commands::Usage {
             window,
             weekly,

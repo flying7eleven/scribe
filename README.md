@@ -27,7 +27,8 @@ To enable optional features:
 ```bash
 cargo install --path . --features guard        # Policy enforcement
 cargo install --path . --features sync         # Multi-machine sync
-cargo install --path . --features guard,sync   # Both
+cargo install --path . --features usage        # Token usage estimation
+cargo install --path . --features guard,sync,usage  # All
 ```
 
 ## Getting Started

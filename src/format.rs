@@ -137,6 +137,7 @@ pub fn format_date_label(date_str: &str) -> String {
 
 /// Convert a character count to an estimated token count string.
 /// Uses the ~4 chars/token heuristic, rounds to nearest 1000, adds "~" prefix.
+#[cfg(feature = "usage")]
 pub fn format_token_estimate(chars: i64) -> String {
     if chars == 0 {
         return "~0".to_string();
@@ -151,6 +152,7 @@ pub fn format_token_estimate(chars: i64) -> String {
 }
 
 /// Format a percentage from part/total.
+#[cfg(feature = "usage")]
 pub fn format_percentage(part: i64, total: i64) -> String {
     if total == 0 {
         return "0%".to_string();
@@ -309,39 +311,46 @@ mod tests {
         assert_eq!(format_duration(630.0), "10m");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_token_estimate_zero() {
         assert_eq!(format_token_estimate(0), "~0");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_token_estimate_small() {
         // 100 chars / 4 = 25 tokens, below 1000 threshold
         assert_eq!(format_token_estimate(100), "~25");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_token_estimate_medium() {
         // 20000 chars / 4 = 5000 tokens, rounds to 5000
         assert_eq!(format_token_estimate(20_000), "~5,000");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_token_estimate_large() {
         // 1824000 chars / 4 = 456000 tokens
         assert_eq!(format_token_estimate(1_824_000), "~456,000");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_percentage_normal() {
         assert_eq!(format_percentage(77, 100), "77%");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_percentage_zero_total() {
         assert_eq!(format_percentage(10, 0), "0%");
     }
 
+    #[cfg(feature = "usage")]
     #[test]
     fn test_format_percentage_zero_part() {
         assert_eq!(format_percentage(0, 100), "0%");

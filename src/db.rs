@@ -1776,6 +1776,7 @@ pub async fn fetch_event_detail(
 // ── Token usage estimation (E013) ──
 
 /// Aggregated character counts for token estimation.
+#[cfg(feature = "usage")]
 #[derive(Debug, Serialize)]
 pub struct TokenUsageSummary {
     pub session_count: i64,
@@ -1785,6 +1786,7 @@ pub struct TokenUsageSummary {
 }
 
 /// Token usage grouped by model.
+#[cfg(feature = "usage")]
 #[derive(Debug, Serialize)]
 pub struct ModelTokenUsage {
     pub model: String,
@@ -1792,6 +1794,7 @@ pub struct ModelTokenUsage {
 }
 
 /// Token usage grouped by tool.
+#[cfg(feature = "usage")]
 #[derive(Debug, Serialize)]
 pub struct ToolTokenUsage {
     pub tool_name: String,
@@ -1799,6 +1802,7 @@ pub struct ToolTokenUsage {
 }
 
 /// Aggregate character counts for token estimation within a time window.
+#[cfg(feature = "usage")]
 pub async fn token_usage_summary(
     pool: &SqlitePool,
     since: &str,
@@ -1856,6 +1860,7 @@ pub async fn token_usage_summary(
 }
 
 /// Token usage grouped by model, via SessionStart JOIN.
+#[cfg(feature = "usage")]
 pub async fn token_usage_by_model(
     pool: &SqlitePool,
     since: &str,
@@ -1881,6 +1886,7 @@ pub async fn token_usage_by_model(
 }
 
 /// Token usage grouped by tool name, ordered by total descending.
+#[cfg(feature = "usage")]
 pub async fn token_usage_by_tool(
     pool: &SqlitePool,
     since: &str,
