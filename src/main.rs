@@ -15,6 +15,7 @@ mod cmd_retain;
 mod cmd_stats;
 #[cfg(feature = "sync")]
 mod cmd_sync;
+mod cmd_usage;
 mod config;
 mod db;
 mod format;
@@ -103,6 +104,18 @@ enum Commands {
         #[arg(long)]
         since: Option<String>,
         /// Output stats as a single JSON object
+        #[arg(long)]
+        json: bool,
+    },
+    /// Estimate token usage for rate limit awareness
+    Usage {
+        /// Time window for primary estimate (e.g. 5h, 3h, 1h)
+        #[arg(long, default_value = "5h")]
+        window: String,
+        /// Time window for weekly estimate (e.g. 7d, 14d)
+        #[arg(long, default_value = "7d")]
+        weekly: String,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
@@ -390,6 +403,16 @@ async fn main() {
             .await
             {
                 eprintln!("scribe: stats error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Usage {
+            window,
+            weekly,
+            json,
+        } => {
+            if let Err(e) = cmd_usage::run(&pool, &window, &weekly, json).await {
+                eprintln!("scribe: usage error: {e}");
                 std::process::exit(1);
             }
         }

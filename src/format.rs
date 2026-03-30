@@ -135,6 +135,30 @@ pub fn format_date_label(date_str: &str) -> String {
     date_str.to_string()
 }
 
+/// Convert a character count to an estimated token count string.
+/// Uses the ~4 chars/token heuristic, rounds to nearest 1000, adds "~" prefix.
+pub fn format_token_estimate(chars: i64) -> String {
+    if chars == 0 {
+        return "~0".to_string();
+    }
+    let tokens = chars / 4;
+    if tokens < 1000 {
+        return format!("~{tokens}");
+    }
+    // Round to nearest 1000
+    let rounded = ((tokens + 500) / 1000) * 1000;
+    format!("~{}", format_count(rounded))
+}
+
+/// Format a percentage from part/total.
+pub fn format_percentage(part: i64, total: i64) -> String {
+    if total == 0 {
+        return "0%".to_string();
+    }
+    let pct = (part as f64 / total as f64 * 100.0).round() as i64;
+    format!("{pct}%")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +307,43 @@ mod tests {
     #[test]
     fn test_format_duration_large_minutes_no_seconds() {
         assert_eq!(format_duration(630.0), "10m");
+    }
+
+    #[test]
+    fn test_format_token_estimate_zero() {
+        assert_eq!(format_token_estimate(0), "~0");
+    }
+
+    #[test]
+    fn test_format_token_estimate_small() {
+        // 100 chars / 4 = 25 tokens, below 1000 threshold
+        assert_eq!(format_token_estimate(100), "~25");
+    }
+
+    #[test]
+    fn test_format_token_estimate_medium() {
+        // 20000 chars / 4 = 5000 tokens, rounds to 5000
+        assert_eq!(format_token_estimate(20_000), "~5,000");
+    }
+
+    #[test]
+    fn test_format_token_estimate_large() {
+        // 1824000 chars / 4 = 456000 tokens
+        assert_eq!(format_token_estimate(1_824_000), "~456,000");
+    }
+
+    #[test]
+    fn test_format_percentage_normal() {
+        assert_eq!(format_percentage(77, 100), "77%");
+    }
+
+    #[test]
+    fn test_format_percentage_zero_total() {
+        assert_eq!(format_percentage(10, 0), "0%");
+    }
+
+    #[test]
+    fn test_format_percentage_zero_part() {
+        assert_eq!(format_percentage(0, 100), "0%");
     }
 }

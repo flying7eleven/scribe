@@ -1749,6 +1749,141 @@ pub async fn fetch_event_detail(
     }
 }
 
+// ── Token usage estimation (E013) ──
+
+/// Aggregated character counts for token estimation.
+#[derive(Debug, Serialize)]
+pub struct TokenUsageSummary {
+    pub session_count: i64,
+    pub event_count: i64,
+    pub input_chars: i64,
+    pub output_chars: i64,
+}
+
+/// Token usage grouped by model.
+#[derive(Debug, Serialize)]
+pub struct ModelTokenUsage {
+    pub model: String,
+    pub total_chars: i64,
+}
+
+/// Token usage grouped by tool.
+#[derive(Debug, Serialize)]
+pub struct ToolTokenUsage {
+    pub tool_name: String,
+    pub total_chars: i64,
+}
+
+/// Aggregate character counts for token estimation within a time window.
+pub async fn token_usage_summary(
+    pool: &SqlitePool,
+    since: &str,
+) -> Result<TokenUsageSummary, Box<dyn std::error::Error>> {
+    // Event/session counts
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM events WHERE timestamp >= ?",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    // Input chars: tool_response (PostToolUse) + prompt (UserPromptSubmit)
+    let response_chars: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(LENGTH(tool_response)), 0) FROM events \
+         WHERE event_type = 'PostToolUse' AND tool_response IS NOT NULL AND timestamp >= ?",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    let prompt_chars: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(LENGTH(ped.prompt)), 0) \
+         FROM events e JOIN prompt_event_details ped ON ped.event_id = e.id \
+         WHERE e.event_type = 'UserPromptSubmit' AND e.timestamp >= ?",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    // Output chars: tool_input (all tool events) + last_assistant_message (Stop/SubagentStop)
+    let tool_input_chars: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(LENGTH(tool_input)), 0) FROM events \
+         WHERE tool_input IS NOT NULL AND timestamp >= ?",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    let assistant_chars: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(LENGTH(sed.last_assistant_message)), 0) \
+         FROM events e JOIN stop_event_details sed ON sed.event_id = e.id \
+         WHERE e.event_type IN ('Stop', 'SubagentStop') AND e.timestamp >= ?",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(TokenUsageSummary {
+        session_count: counts.1,
+        event_count: counts.0,
+        input_chars: response_chars.0 + prompt_chars.0,
+        output_chars: tool_input_chars.0 + assistant_chars.0,
+    })
+}
+
+/// Token usage grouped by model, via SessionStart JOIN.
+pub async fn token_usage_by_model(
+    pool: &SqlitePool,
+    since: &str,
+) -> Result<Vec<ModelTokenUsage>, Box<dyn std::error::Error>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT sed.model, \
+             COALESCE(SUM(LENGTH(e.tool_input)), 0) + COALESCE(SUM(LENGTH(e.tool_response)), 0) as total_chars \
+         FROM events e \
+         JOIN events e_start ON e_start.session_id = e.session_id AND e_start.event_type = 'SessionStart' \
+         JOIN session_event_details sed ON sed.event_id = e_start.id \
+         WHERE e.timestamp >= ? AND sed.model IS NOT NULL \
+         GROUP BY sed.model \
+         ORDER BY total_chars DESC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(model, total_chars)| ModelTokenUsage { model, total_chars })
+        .collect())
+}
+
+/// Token usage grouped by tool name, ordered by total descending.
+pub async fn token_usage_by_tool(
+    pool: &SqlitePool,
+    since: &str,
+    limit: u32,
+) -> Result<Vec<ToolTokenUsage>, Box<dyn std::error::Error>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT tool_name, \
+             COALESCE(SUM(LENGTH(tool_input)), 0) + COALESCE(SUM(LENGTH(tool_response)), 0) as total_chars \
+         FROM events \
+         WHERE tool_name IS NOT NULL AND timestamp >= ? \
+         GROUP BY tool_name \
+         ORDER BY total_chars DESC LIMIT ?",
+    )
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(tool_name, total_chars)| ToolTokenUsage {
+            tool_name,
+            total_chars,
+        })
+        .collect())
+}
+
 // ── Sync functions (E012) ──
 
 /// Backfill `origin_machine_id` on events that don't have one yet.
