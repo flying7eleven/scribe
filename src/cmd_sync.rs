@@ -4,7 +4,7 @@ use std::io::{self, BufReader, Read};
 use clap::Subcommand;
 use sqlx::SqlitePool;
 
-use crate::sync::{bundle, crypto, merge};
+use crate::sync::{bundle, crypto, merge, transport};
 
 #[derive(Subcommand)]
 pub enum SyncCommand {
@@ -74,8 +74,16 @@ pub async fn handle(cmd: SyncCommand, pool: &SqlitePool) -> Result<(), Box<dyn E
         SyncCommand::Keypair { command } => handle_keypair(command, pool).await,
         SyncCommand::Export { since } => handle_export(pool, since).await,
         SyncCommand::Import => handle_import(pool).await,
-        SyncCommand::Push { .. } => todo!("US-0057: sync push"),
-        SyncCommand::Pull { .. } => todo!("US-0057: sync pull"),
+        SyncCommand::Push { remote, since } => {
+            let result = transport::push(pool, &remote, since.as_deref()).await?;
+            println!("{}", transport::format_result(&result, &remote));
+            Ok(())
+        }
+        SyncCommand::Pull { remote, since } => {
+            let result = transport::pull(pool, &remote, since.as_deref()).await?;
+            println!("{}", transport::format_result(&result, &remote));
+            Ok(())
+        }
         SyncCommand::Status => todo!("US-0058: sync status"),
     }
 }
