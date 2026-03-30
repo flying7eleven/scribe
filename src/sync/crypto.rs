@@ -157,7 +157,6 @@ pub fn remove_peer(name: &str) -> Result<(), Box<dyn Error>> {
 }
 
 /// Load all recipients (self + all peers) for encryption.
-#[allow(dead_code)] // used by US-0055 (encryption layer)
 pub fn all_recipients() -> Result<Vec<x25519::Recipient>, Box<dyn Error>> {
     let mut recipients = Vec::new();
 
@@ -180,7 +179,6 @@ pub fn all_recipients() -> Result<Vec<x25519::Recipient>, Box<dyn Error>> {
 }
 
 /// Load the local identity (private key) for decryption.
-#[allow(dead_code)] // used by US-0055 (encryption layer)
 pub fn local_identity() -> Result<x25519::Identity, Box<dyn Error>> {
     let path = sync_dir()?.join("identity.age");
     if !path.exists() {
@@ -196,6 +194,51 @@ pub fn local_identity() -> Result<x25519::Identity, Box<dyn Error>> {
 // Re-export for use by other sync modules and tests
 #[allow(unused_imports)]
 pub use age::secrecy::ExposeSecret;
+
+// ── Encryption / Decryption ──
+
+/// Encrypt plaintext from a reader to an age-encrypted writer.
+/// Encrypts to all known recipients (self + peers).
+pub fn encrypt_stream<R: std::io::Read, W: std::io::Write>(
+    mut input: R,
+    output: W,
+) -> Result<(), Box<dyn Error>> {
+    let recipients = all_recipients()?;
+    if recipients.is_empty() {
+        return Err("no recipients found — generate a keypair first".into());
+    }
+
+    let encryptor =
+        age::Encryptor::with_recipients(recipients.iter().map(|r| r as &dyn age::Recipient))
+            .map_err(|_| "failed to create encryptor")?;
+    let mut writer = encryptor
+        .wrap_output(output)
+        .map_err(|e| format!("failed to wrap output: {e}"))?;
+    std::io::copy(&mut input, &mut writer)?;
+    writer
+        .finish()
+        .map_err(|e| format!("failed to finalize encryption: {e}"))?;
+    Ok(())
+}
+
+/// Decrypt age-encrypted data from a reader to a plaintext writer.
+/// Uses the local identity (private key) for decryption.
+pub fn decrypt_stream<R: std::io::Read, W: std::io::Write>(
+    input: R,
+    mut output: W,
+) -> Result<(), Box<dyn Error>> {
+    let identity = local_identity()?;
+
+    let decryptor =
+        age::Decryptor::new(input).map_err(|e| format!("failed to parse encrypted data: {e}"))?;
+
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+        .map_err(|e| format!("decryption failed — check keypair exchange: {e}"))?;
+    std::io::copy(&mut reader, &mut output)?;
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -351,5 +394,85 @@ mod tests {
         }
 
         assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let identity = x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let plaintext = b"Hello, world! This is a test of age encryption.";
+
+        // Encrypt
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                .unwrap();
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+        std::io::Write::write_all(&mut writer, plaintext).unwrap();
+        writer.finish().unwrap();
+
+        assert!(!ciphertext.is_empty());
+        assert_ne!(&ciphertext[..], plaintext);
+
+        // Decrypt
+        let decryptor = age::Decryptor::new(ciphertext.as_slice()).unwrap();
+        let mut decrypted = Vec::new();
+        let mut reader = decryptor
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .unwrap();
+        std::io::Read::read_to_end(&mut reader, &mut decrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_multiple_recipients() {
+        let id1 = x25519::Identity::generate();
+        let id2 = x25519::Identity::generate();
+        let r1 = id1.to_public();
+        let r2 = id2.to_public();
+        let plaintext = b"secret data";
+
+        // Encrypt to both recipients
+        let encryptor = age::Encryptor::with_recipients(
+            [&r1 as &dyn age::Recipient, &r2 as &dyn age::Recipient].into_iter(),
+        )
+        .unwrap();
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+        std::io::Write::write_all(&mut writer, plaintext).unwrap();
+        writer.finish().unwrap();
+
+        // Both identities should be able to decrypt
+        for identity in [&id1, &id2] {
+            let decryptor = age::Decryptor::new(ciphertext.as_slice()).unwrap();
+            let mut decrypted = Vec::new();
+            let mut reader = decryptor
+                .decrypt(std::iter::once(identity as &dyn age::Identity))
+                .unwrap();
+            std::io::Read::read_to_end(&mut reader, &mut decrypted).unwrap();
+            assert_eq!(decrypted, plaintext);
+        }
+    }
+
+    #[test]
+    fn test_decrypt_wrong_identity_fails() {
+        let id1 = x25519::Identity::generate();
+        let id_wrong = x25519::Identity::generate();
+        let r1 = id1.to_public();
+        let plaintext = b"secret";
+
+        // Encrypt to id1 only
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&r1 as &dyn age::Recipient)).unwrap();
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+        std::io::Write::write_all(&mut writer, plaintext).unwrap();
+        writer.finish().unwrap();
+
+        // Attempt decrypt with wrong identity
+        let decryptor = age::Decryptor::new(ciphertext.as_slice()).unwrap();
+        let result = decryptor.decrypt(std::iter::once(&id_wrong as &dyn age::Identity));
+        assert!(result.is_err());
     }
 }
