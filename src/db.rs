@@ -1765,6 +1765,331 @@ pub async fn backfill_origin_machine_id(
     Ok(result.rows_affected())
 }
 
+/// Fetch events since a timestamp, ordered by timestamp ASC.
+/// Returns (event_id, EventRow) pairs.
+#[cfg(feature = "sync")]
+pub async fn export_events_since(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<(i64, crate::sync::bundle::EventRow)>, Box<dyn std::error::Error>> {
+    use sqlx::Row;
+    let rows = if let Some(since) = since {
+        sqlx::query(
+            "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, \
+             tool_response, cwd, permission_mode, raw_payload, origin_machine_id \
+             FROM events WHERE timestamp > ? ORDER BY timestamp ASC",
+        )
+        .bind(since)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, \
+             tool_response, cwd, permission_mode, raw_payload, origin_machine_id \
+             FROM events ORDER BY timestamp ASC",
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let id: i64 = row.get("id");
+            let event = crate::sync::bundle::EventRow {
+                timestamp: row.get("timestamp"),
+                session_id: row.get("session_id"),
+                event_type: row.get("event_type"),
+                tool_name: row.get("tool_name"),
+                tool_input: row.get("tool_input"),
+                tool_response: row.get("tool_response"),
+                cwd: row.get("cwd"),
+                permission_mode: row.get("permission_mode"),
+                raw_payload: row.get("raw_payload"),
+                origin_machine_id: row.get("origin_machine_id"),
+            };
+            (id, event)
+        })
+        .collect())
+}
+
+/// Fetch all detail rows for an event, returning a SyncEventDetails container.
+#[cfg(feature = "sync")]
+pub async fn get_event_details_for_sync(
+    pool: &SqlitePool,
+    event_id: i64,
+    event_type: &str,
+) -> Result<crate::sync::bundle::SyncEventDetails, Box<dyn std::error::Error>> {
+    use crate::sync::bundle::*;
+    use sqlx::Row;
+
+    let mut details = SyncEventDetails::default();
+
+    match event_type {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT tool_use_id, error, error_details, is_interrupt, permission_suggestions \
+                 FROM tool_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.tool = Some(ToolEventDetails {
+                    tool_use_id: row.get("tool_use_id"),
+                    error: row.get("error"),
+                    error_details: row.get("error_details"),
+                    is_interrupt: row.get::<Option<i32>, _>("is_interrupt").map(|v| v != 0),
+                    permission_suggestions: row.get("permission_suggestions"),
+                });
+            }
+        }
+        "Stop" | "StopFailure" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT stop_hook_active, last_assistant_message, error, error_details \
+                 FROM stop_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.stop = Some(StopEventDetails {
+                    stop_hook_active: row
+                        .get::<Option<i32>, _>("stop_hook_active")
+                        .map(|v| v != 0),
+                    last_assistant_message: row.get("last_assistant_message"),
+                    error: row.get("error"),
+                    error_details: row.get("error_details"),
+                });
+            }
+        }
+        "SubagentStop" => {
+            // Dual query: stop + agent details
+            if let Ok(row) = sqlx::query(
+                "SELECT stop_hook_active, last_assistant_message, error, error_details \
+                 FROM stop_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.stop = Some(StopEventDetails {
+                    stop_hook_active: row
+                        .get::<Option<i32>, _>("stop_hook_active")
+                        .map(|v| v != 0),
+                    last_assistant_message: row.get("last_assistant_message"),
+                    error: row.get("error"),
+                    error_details: row.get("error_details"),
+                });
+            }
+            if let Ok(row) = sqlx::query(
+                "SELECT agent_id, agent_type, agent_transcript_path \
+                 FROM agent_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.agent = Some(AgentEventDetails {
+                    agent_id: row.get("agent_id"),
+                    agent_type: row.get("agent_type"),
+                    agent_transcript_path: row.get("agent_transcript_path"),
+                });
+            }
+        }
+        "SubagentStart" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT agent_id, agent_type, agent_transcript_path \
+                 FROM agent_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.agent = Some(AgentEventDetails {
+                    agent_id: row.get("agent_id"),
+                    agent_type: row.get("agent_type"),
+                    agent_transcript_path: row.get("agent_transcript_path"),
+                });
+            }
+        }
+        "SessionStart" | "SessionEnd" | "ConfigChange" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT source, model, reason, file_path \
+                 FROM session_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.session = Some(SessionEventDetails {
+                    source: row.get("source"),
+                    model: row.get("model"),
+                    reason: row.get("reason"),
+                    file_path: row.get("file_path"),
+                });
+            }
+        }
+        "Notification" | "Elicitation" | "ElicitationResult" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT notification_type, title, message, elicitation_id, mcp_server_name, \
+                 mode, url, requested_schema, action, content \
+                 FROM notification_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.notification = Some(NotificationEventDetails {
+                    notification_type: row.get("notification_type"),
+                    title: row.get("title"),
+                    message: row.get("message"),
+                    elicitation_id: row.get("elicitation_id"),
+                    mcp_server_name: row.get("mcp_server_name"),
+                    mode: row.get("mode"),
+                    url: row.get("url"),
+                    requested_schema: row.get("requested_schema"),
+                    action: row.get("action"),
+                    content: row.get("content"),
+                });
+            }
+        }
+        "PreCompact" | "PostCompact" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT `trigger`, custom_instructions, compact_summary \
+                 FROM compact_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.compact = Some(CompactEventDetails {
+                    trigger: row.get("trigger"),
+                    custom_instructions: row.get("custom_instructions"),
+                    compact_summary: row.get("compact_summary"),
+                });
+            }
+        }
+        "InstructionsLoaded" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path \
+                 FROM instruction_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.instruction = Some(InstructionEventDetails {
+                    file_path: row.get("file_path"),
+                    memory_type: row.get("memory_type"),
+                    load_reason: row.get("load_reason"),
+                    globs: row.get("globs"),
+                    trigger_file_path: row.get("trigger_file_path"),
+                    parent_file_path: row.get("parent_file_path"),
+                });
+            }
+        }
+        "TeammateIdle" | "TaskCompleted" | "TaskCreated" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT teammate_name, team_name, task_id, task_subject, task_description \
+                 FROM team_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.team = Some(TeamEventDetails {
+                    teammate_name: row.get("teammate_name"),
+                    team_name: row.get("team_name"),
+                    task_id: row.get("task_id"),
+                    task_subject: row.get("task_subject"),
+                    task_description: row.get("task_description"),
+                });
+            }
+        }
+        "UserPromptSubmit" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT prompt FROM prompt_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.prompt = Some(PromptEventDetails {
+                    prompt: row.get("prompt"),
+                });
+            }
+        }
+        "WorktreeRemove" | "WorktreeCreate" => {
+            if let Ok(row) = sqlx::query(
+                "SELECT worktree_path FROM worktree_event_details WHERE event_id = ?",
+            )
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            {
+                details.worktree = Some(WorktreeEventDetails {
+                    worktree_path: row.get("worktree_path"),
+                });
+            }
+        }
+        _ => {} // Unknown event types have no detail rows
+    }
+
+    Ok(details)
+}
+
+/// Fetch classifications linked to an event_id.
+#[cfg(feature = "sync")]
+pub async fn get_event_classifications(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> Result<Vec<crate::sync::bundle::ClassificationRow>, Box<dyn std::error::Error>> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT timestamp, tool_name, input_pattern, risk_level, reason, heuristic \
+         FROM classifications WHERE event_id = ?",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::sync::bundle::ClassificationRow {
+            timestamp: row.get("timestamp"),
+            tool_name: row.get("tool_name"),
+            input_pattern: row.get("input_pattern"),
+            risk_level: row.get("risk_level"),
+            reason: row.get("reason"),
+            heuristic: row.get("heuristic"),
+        })
+        .collect())
+}
+
+/// Fetch enforcements linked to an event_id.
+#[cfg(feature = "sync")]
+pub async fn get_event_enforcements(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> Result<Vec<crate::sync::bundle::EnforcementRow>, Box<dyn std::error::Error>> {
+    // Enforcements don't have event_id directly — they're linked by session_id + timestamp.
+    // For sync, we query by matching the enforcement timestamp to the event's timestamp window.
+    // However, since enforcements log guard decisions and aren't directly linked to events.id,
+    // we export all enforcements that share the same session_id and approximate timestamp.
+    // For simplicity, we query by session_id within a small window around the event.
+    //
+    // Actually, enforcements don't have an event_id FK at all. They're independent records.
+    // For the sync export, we'll attach enforcements to events by matching session_id + tool_name
+    // at the same timestamp. But this is imprecise.
+    //
+    // Simpler approach: export enforcements separately, not per-event.
+    // For now, return empty — enforcements will be exported as standalone records
+    // in a future enhancement or as part of the full DB export.
+    let _ = (pool, event_id);
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
