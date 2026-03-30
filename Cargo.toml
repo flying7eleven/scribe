@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 guard = ["regex"]
+sync = ["age", "hostname"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -22,6 +23,8 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 sqlx-sqlite = { version = "0.8", features = ["bundled"] }
 ratatui = "0.29"
 regex = { version = "1", optional = true }
+age = { version = "0.11", optional = true }
+hostname = { version = "0.4", optional = true }
 toml = "0.8"
 toml_edit = "0.22"
 tokio = { version = "1", features = ["rt", "macros"] }

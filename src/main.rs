@@ -13,10 +13,14 @@ mod cmd_policy;
 mod cmd_query;
 mod cmd_retain;
 mod cmd_stats;
+#[cfg(feature = "sync")]
+mod cmd_sync;
 mod config;
 mod db;
 mod format;
 mod models;
+#[cfg(feature = "sync")]
+mod sync;
 mod tui;
 
 use std::path::PathBuf;
@@ -132,6 +136,12 @@ enum Commands {
     /// Evaluate tool call against policy rules (PreToolUse hook)
     #[cfg(feature = "guard")]
     Guard,
+    /// Synchronize database with remote machines
+    #[cfg(feature = "sync")]
+    Sync {
+        #[command(subcommand)]
+        command: cmd_sync::SyncCommand,
+    },
     /// Backfill detail tables from existing event raw_payload data
     Backfill {
         /// Show what would be backfilled without modifying the database
@@ -263,6 +273,13 @@ async fn main() {
             let exit_code = cmd_guard::run(&pool).await;
             if exit_code != 0 {
                 std::process::exit(exit_code);
+            }
+        }
+        #[cfg(feature = "sync")]
+        Commands::Sync { command } => {
+            if let Err(e) = cmd_sync::handle(command, &pool).await {
+                eprintln!("scribe: sync error: {e}");
+                std::process::exit(1);
             }
         }
         Commands::Query {

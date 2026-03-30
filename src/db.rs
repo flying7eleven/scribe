@@ -1955,7 +1955,8 @@ mod tests {
                 "tool_response",
                 "cwd",
                 "permission_mode",
-                "raw_payload"
+                "raw_payload",
+                "origin_machine_id"
             ]
         );
 
@@ -1987,6 +1988,7 @@ mod tests {
             indexes,
             vec![
                 "idx_events_cwd",
+                "idx_events_dedup",
                 "idx_events_session",
                 "idx_events_tool",
                 "idx_events_ts",
@@ -3691,10 +3693,10 @@ mod tests {
     async fn test_tool_failures_by_error() {
         let (pool, _dir) = setup_detail_db().await;
 
-        // Insert PostToolUseFailure events with errors
-        for _ in 0..3 {
+        // Insert PostToolUseFailure events with errors (different sessions to satisfy dedup index)
+        for i in 0..3 {
             let hook = crate::models::HookInput {
-                session_id: "s1".into(),
+                session_id: format!("s{i}"),
                 hook_event_name: "PostToolUseFailure".into(),
                 cwd: "/tmp".into(),
                 tool_name: Some("Bash".into()),
@@ -3704,7 +3706,7 @@ mod tests {
             insert_event(&pool, &hook, "{}").await.unwrap();
         }
         let hook = crate::models::HookInput {
-            session_id: "s1".into(),
+            session_id: "s3".into(),
             hook_event_name: "PostToolUseFailure".into(),
             cwd: "/tmp".into(),
             tool_name: Some("Read".into()),
@@ -3729,9 +3731,10 @@ mod tests {
         let (pool, _dir) = setup_detail_db().await;
 
         // Insert StopFailure events with stop_event_details populated
-        for _ in 0..2 {
+        // (different sessions to satisfy dedup index)
+        for i in 0..2 {
             let hook = crate::models::HookInput {
-                session_id: "s1".into(),
+                session_id: format!("s{i}"),
                 hook_event_name: "StopFailure".into(),
                 cwd: "/tmp".into(),
                 error: Some("context_limit".into()),
@@ -3742,7 +3745,7 @@ mod tests {
                 .unwrap();
         }
         let hook = crate::models::HookInput {
-            session_id: "s1".into(),
+            session_id: "s2".into(),
             hook_event_name: "StopFailure".into(),
             cwd: "/tmp".into(),
             error: Some("timeout".into()),
@@ -3767,12 +3770,13 @@ mod tests {
         let (pool, _dir) = setup_detail_db().await;
 
         // Insert StopFailure events directly (bypassing detail table population)
-        // by inserting into events table only
+        // by inserting into events table only. Use distinct timestamps to satisfy dedup index.
         sqlx::query(
-            "INSERT INTO events (session_id, event_type, cwd, raw_payload) VALUES (?, ?, ?, ?)",
+            "INSERT INTO events (session_id, event_type, timestamp, cwd, raw_payload) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("s1")
         .bind("StopFailure")
+        .bind("2026-01-01T00:00:00.000Z")
         .bind("/tmp")
         .bind(r#"{"error":"context_limit"}"#)
         .execute(&pool)
@@ -3780,10 +3784,11 @@ mod tests {
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO events (session_id, event_type, cwd, raw_payload) VALUES (?, ?, ?, ?)",
+            "INSERT INTO events (session_id, event_type, timestamp, cwd, raw_payload) VALUES (?, ?, ?, ?, ?)",
         )
         .bind("s1")
         .bind("StopFailure")
+        .bind("2026-01-01T00:00:01.000Z")
         .bind("/tmp")
         .bind(r#"{"error":"context_limit"}"#)
         .execute(&pool)

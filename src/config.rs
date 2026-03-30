@@ -31,6 +31,11 @@ pub const CONFIG_TEMPLATE: &str = "\
 # Examples: \"4h\", \"8h\", \"1d\"
 # Default: disabled (all sessions included)
 # max_session_duration = \"8h\"
+
+# [sync]
+# Machine display name for sync identification.
+# Default: system hostname
+# machine_name = \"work-laptop\"
 ";
 
 #[derive(Deserialize, Default)]
@@ -41,6 +46,13 @@ pub struct Config {
     pub retention_check_interval: Option<String>,
     pub default_query_limit: Option<i64>,
     pub max_session_duration: Option<String>,
+    pub sync: Option<SyncConfig>,
+}
+
+#[derive(Deserialize, Default)]
+#[allow(dead_code)] // consumed by sync feature (E012)
+pub struct SyncConfig {
+    pub machine_name: Option<String>,
 }
 
 /// Returns the platform-appropriate config file path.
@@ -328,6 +340,7 @@ mod tests {
             "retention",
             "retention_check_interval",
             "default_query_limit",
+            "machine_name",
         ];
         for field in &field_names {
             let pattern = format!("# {field} =");
@@ -494,8 +507,8 @@ default_query_limit = 200
         .unwrap();
 
         let report = migrate_config_at(&path).unwrap().unwrap();
-        // retention, retention_check_interval, and max_session_duration should be added
-        assert_eq!(report.fields_added.len(), 3);
+        // retention, retention_check_interval, max_session_duration, and machine_name should be added
+        assert_eq!(report.fields_added.len(), 4);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("db_path = \"/my/path.db\""));
@@ -526,7 +539,7 @@ default_query_limit = 200
         std::fs::write(&path, "").unwrap();
 
         let report = migrate_config_at(&path).unwrap().unwrap();
-        assert_eq!(report.fields_added.len(), 5);
+        assert_eq!(report.fields_added.len(), 6);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# db_path ="));
@@ -584,10 +597,10 @@ default_query_limit = 200
     fn test_migrate_mix_active_and_commented() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        // Mix of active and commented-out fields covering all 4
+        // Mix of active and commented-out fields covering all 6
         std::fs::write(
             &path,
-            "db_path = \"/custom.db\"\n# retention = \"90d\"\n# retention_check_interval = \"12h\"\ndefault_query_limit = 100\n# max_session_duration = \"8h\"\n",
+            "db_path = \"/custom.db\"\n# retention = \"90d\"\n# retention_check_interval = \"12h\"\ndefault_query_limit = 100\n# max_session_duration = \"8h\"\n# machine_name = \"laptop\"\n",
         )
         .unwrap();
 
@@ -603,7 +616,7 @@ default_query_limit = 200
         // Config with all known fields plus an unknown one
         std::fs::write(
             &path,
-            "db_path = \"/custom.db\"\nunknown_setting = true\n# retention = \"90d\"\n# retention_check_interval = \"24h\"\n# default_query_limit = 50\n# max_session_duration = \"8h\"\n",
+            "db_path = \"/custom.db\"\nunknown_setting = true\n# retention = \"90d\"\n# retention_check_interval = \"24h\"\n# default_query_limit = 50\n# max_session_duration = \"8h\"\n# machine_name = \"laptop\"\n",
         )
         .unwrap();
 
