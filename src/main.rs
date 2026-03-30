@@ -31,7 +31,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "scribe",
-    version,
+    version = env!("SCRIBE_VERSION"),
     about = "Audit logger for Claude Code hook events"
 )]
 pub struct Cli {
