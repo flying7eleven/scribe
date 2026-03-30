@@ -2090,6 +2090,123 @@ pub async fn get_event_enforcements(
     Ok(Vec::new())
 }
 
+/// Check if an event already exists by the dedup composite key.
+/// Returns the event ID if found.
+#[cfg(feature = "sync")]
+pub async fn check_event_exists(
+    pool: &SqlitePool,
+    session_id: &str,
+    timestamp: &str,
+    event_type: &str,
+) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM events WHERE session_id = ? AND timestamp = ? AND event_type = ?",
+    )
+    .bind(session_id)
+    .bind(timestamp)
+    .bind(event_type)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Insert a synced event (from a remote machine).
+/// Returns the new local event ID.
+#[cfg(feature = "sync")]
+pub async fn insert_synced_event(
+    pool: &SqlitePool,
+    event: &crate::sync::bundle::EventRow,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let result = sqlx::query(
+        "INSERT INTO events (timestamp, session_id, event_type, tool_name, tool_input, \
+         tool_response, cwd, permission_mode, raw_payload, origin_machine_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&event.timestamp)
+    .bind(&event.session_id)
+    .bind(&event.event_type)
+    .bind(&event.tool_name)
+    .bind(&event.tool_input)
+    .bind(&event.tool_response)
+    .bind(&event.cwd)
+    .bind(&event.permission_mode)
+    .bind(&event.raw_payload)
+    .bind(&event.origin_machine_id)
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// Insert a classification linked to a synced event.
+#[cfg(feature = "sync")]
+pub async fn insert_synced_classification(
+    pool: &SqlitePool,
+    event_id: i64,
+    c: &crate::sync::bundle::ClassificationRow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO classifications (timestamp, event_id, tool_name, input_pattern, \
+         risk_level, reason, heuristic) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&c.timestamp)
+    .bind(event_id)
+    .bind(&c.tool_name)
+    .bind(&c.input_pattern)
+    .bind(&c.risk_level)
+    .bind(&c.reason)
+    .bind(&c.heuristic)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert an enforcement from a synced bundle (rule_id = NULL).
+#[cfg(feature = "sync")]
+pub async fn insert_synced_enforcement(
+    pool: &SqlitePool,
+    e: &crate::sync::bundle::EnforcementRow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO enforcements (timestamp, session_id, tool_name, tool_input, \
+         action, reason, evaluation_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&e.timestamp)
+    .bind(&e.session_id)
+    .bind(&e.tool_name)
+    .bind(&e.tool_input)
+    .bind(&e.action)
+    .bind(&e.reason)
+    .bind(e.evaluation_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Rebuild the sessions table from events.
+/// Deletes all existing session rows and recomputes from events.
+#[cfg(feature = "sync")]
+pub async fn rebuild_sessions(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query("DELETE FROM sessions").execute(pool).await?;
+
+    sqlx::query(
+        "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) \
+         SELECT \
+             session_id, \
+             MIN(timestamp) AS first_seen, \
+             MAX(timestamp) AS last_seen, \
+             (SELECT cwd FROM events e2 \
+              WHERE e2.session_id = events.session_id \
+              ORDER BY e2.timestamp DESC LIMIT 1) AS cwd, \
+             COUNT(*) AS event_count \
+         FROM events \
+         GROUP BY session_id",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

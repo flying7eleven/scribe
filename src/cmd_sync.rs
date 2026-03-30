@@ -4,7 +4,7 @@ use std::io::{self, BufReader, Read};
 use clap::Subcommand;
 use sqlx::SqlitePool;
 
-use crate::sync::{bundle, crypto};
+use crate::sync::{bundle, crypto, merge};
 
 #[derive(Subcommand)]
 pub enum SyncCommand {
@@ -172,27 +172,11 @@ async fn handle_import(pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
     let reader = BufReader::new(plaintext.as_slice());
     let bundles = bundle::import_bundles(reader);
 
-    let mut imported = 0u64;
-    let skipped = 0u64;
-    let mut errors = 0u64;
+    let stats = merge::merge_bundles(pool, bundles).await?;
 
-    for result in bundles {
-        match result {
-            Ok(_bundle) => {
-                // Merge logic implemented in US-0056
-                // For now, count the bundle as imported
-                imported += 1;
-            }
-            Err(e) => {
-                eprintln!("Warning: skipping malformed bundle: {e}");
-                errors += 1;
-            }
-        }
-    }
-
-    // Rebuild sessions after merge (US-0056 will implement actual merge)
-    let _ = (pool, &skipped);
-
-    eprintln!("Imported {imported} events (skipped {skipped}, errors {errors})");
+    eprintln!(
+        "Imported {} events (skipped {}, errors {})",
+        stats.events_imported, stats.events_skipped, stats.errors
+    );
     Ok(())
 }
