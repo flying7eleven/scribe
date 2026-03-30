@@ -2418,6 +2418,41 @@ pub async fn get_sync_log(
         .collect())
 }
 
+/// Insert or update a sync peer entry.
+#[cfg(feature = "sync")]
+pub async fn upsert_sync_peer(
+    pool: &SqlitePool,
+    name: &str,
+    public_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO sync_peers (machine_id, machine_name, public_key) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(machine_id) DO UPDATE SET \
+           machine_name = excluded.machine_name, \
+           public_key = excluded.public_key",
+    )
+    .bind(name)
+    .bind(name)
+    .bind(public_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a sync peer entry by name.
+#[cfg(feature = "sync")]
+pub async fn remove_sync_peer(
+    pool: &SqlitePool,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query("DELETE FROM sync_peers WHERE machine_id = ?")
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Count events with timestamp after the given value.
 #[cfg(feature = "sync")]
 pub async fn count_events_since(

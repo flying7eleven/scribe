@@ -112,6 +112,7 @@ async fn handle_keypair(cmd: KeypairCommand, pool: &SqlitePool) -> Result<(), Bo
         }
         KeypairCommand::Add { name, public_key } => {
             crypto::add_peer(&name, &public_key)?;
+            crate::db::upsert_sync_peer(pool, &name, &public_key).await?;
             println!("Added peer '{name}'");
         }
         KeypairCommand::List => {
@@ -140,6 +141,7 @@ async fn handle_keypair(cmd: KeypairCommand, pool: &SqlitePool) -> Result<(), Bo
         }
         KeypairCommand::Remove { name } => {
             crypto::remove_peer(&name)?;
+            crate::db::remove_sync_peer(pool, &name).await?;
             println!("Removed peer '{name}'");
         }
     }
