@@ -70,13 +70,8 @@ pub async fn push(
         .wait_with_output()
         .map_err(|e| format!("failed to read export output: {e}"))?;
 
-    // Check export exit code
-    if !export_output.status.success() {
-        let stderr = String::from_utf8_lossy(&export_output.stderr);
-        return Err(format!("export failed: {stderr}").into());
-    }
-
-    // Check import (SSH) exit code
+    // Check import (SSH) exit code first — if the remote dies, the local
+    // export gets a broken pipe which hides the actual root cause.
     if !import_output.status.success() {
         let stderr = String::from_utf8_lossy(&import_output.stderr);
         let msg = if stderr.contains("command not found") {
@@ -89,6 +84,12 @@ pub async fn push(
         // Log failure
         let _ = insert_sync_log(pool, remote, "push", 0, 0, "error", Some(&msg)).await;
         return Err(msg.into());
+    }
+
+    // Check export exit code
+    if !export_output.status.success() {
+        let stderr = String::from_utf8_lossy(&export_output.stderr);
+        return Err(format!("export failed: {stderr}").into());
     }
 
     // Parse event counts from stderr
@@ -178,6 +179,23 @@ pub async fn pull(
         .wait_with_output()
         .map_err(|e| format!("failed to read SSH output: {e}"))?;
 
+    // Check local import exit code first — if import dies, the remote
+    // export gets a broken pipe which hides the actual root cause.
+    if !import_output.status.success() {
+        let stderr = String::from_utf8_lossy(&import_output.stderr);
+        let _ = insert_sync_log(
+            pool,
+            remote,
+            "pull",
+            0,
+            0,
+            "error",
+            Some(&format!("local import failed: {stderr}")),
+        )
+        .await;
+        return Err(format!("local import failed: {stderr}").into());
+    }
+
     // Check SSH (export) exit code
     if !export_output.status.success() {
         let stderr = String::from_utf8_lossy(&export_output.stderr);
@@ -192,22 +210,6 @@ pub async fn pull(
         };
         let _ = insert_sync_log(pool, remote, "pull", 0, 0, "error", Some(&msg)).await;
         return Err(msg.into());
-    }
-
-    // Check local import exit code
-    if !import_output.status.success() {
-        let stderr = String::from_utf8_lossy(&import_output.stderr);
-        let _ = insert_sync_log(
-            pool,
-            remote,
-            "pull",
-            0,
-            0,
-            "error",
-            Some(&format!("local import failed: {stderr}")),
-        )
-        .await;
-        return Err(format!("local import failed: {stderr}").into());
     }
 
     // Parse event counts from stderr
