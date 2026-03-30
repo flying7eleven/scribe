@@ -3,6 +3,8 @@ use std::error::Error;
 use clap::Subcommand;
 use sqlx::SqlitePool;
 
+use crate::sync::crypto;
+
 #[derive(Subcommand)]
 pub enum SyncCommand {
     /// Generate, show, or manage age encryption keypairs
@@ -66,19 +68,71 @@ pub enum KeypairCommand {
     },
 }
 
-pub async fn handle(cmd: SyncCommand, _pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
+pub async fn handle(cmd: SyncCommand, pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
     match cmd {
-        SyncCommand::Keypair { command } => match command {
-            KeypairCommand::Generate { .. } => todo!("US-0053: keypair generate"),
-            KeypairCommand::Show => todo!("US-0053: keypair show"),
-            KeypairCommand::Add { .. } => todo!("US-0053: keypair add"),
-            KeypairCommand::List => todo!("US-0053: keypair list"),
-            KeypairCommand::Remove { .. } => todo!("US-0053: keypair remove"),
-        },
+        SyncCommand::Keypair { command } => handle_keypair(command, pool).await,
         SyncCommand::Push { .. } => todo!("US-0057: sync push"),
         SyncCommand::Pull { .. } => todo!("US-0057: sync pull"),
         SyncCommand::Status => todo!("US-0058: sync status"),
         SyncCommand::Export { .. } => todo!("US-0055: sync export"),
         SyncCommand::Import => todo!("US-0055: sync import"),
     }
+}
+
+async fn handle_keypair(cmd: KeypairCommand, pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
+    match cmd {
+        KeypairCommand::Generate { force } => {
+            let machine_id = crypto::machine_id()?;
+            let public_key = crypto::generate_keypair(force)?;
+
+            // Backfill origin_machine_id on existing events
+            let updated = crate::db::backfill_origin_machine_id(pool, &machine_id).await?;
+            if updated > 0 {
+                eprintln!("Backfilled origin_machine_id on {updated} existing events");
+            }
+
+            println!("Machine ID: {machine_id}");
+            println!("Public key: {public_key}");
+            println!();
+            println!("Share this public key with peers via:");
+            println!("  scribe sync keypair add <name> {public_key}");
+        }
+        KeypairCommand::Show => {
+            let public_key = crypto::local_public_key()?;
+            println!("{public_key}");
+        }
+        KeypairCommand::Add { name, public_key } => {
+            crypto::add_peer(&name, &public_key)?;
+            println!("Added peer '{name}'");
+        }
+        KeypairCommand::List => {
+            let machine_id = crypto::machine_id()?;
+            let local_key = crypto::local_public_key().ok();
+            let peers = crypto::list_peers()?;
+
+            println!("Local machine ({machine_id}):");
+            if let Some(key) = local_key {
+                println!("  {key}");
+            } else {
+                println!("  (no keypair — run 'scribe sync keypair generate')");
+            }
+            println!();
+
+            if peers.is_empty() {
+                println!("No peers configured.");
+            } else {
+                // Find max name length for alignment
+                let max_name = peers.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+                println!("{:<width$}  Public Key", "Name", width = max_name);
+                for (name, key) in &peers {
+                    println!("{:<width$}  {key}", name, width = max_name);
+                }
+            }
+        }
+        KeypairCommand::Remove { name } => {
+            crypto::remove_peer(&name)?;
+            println!("Removed peer '{name}'");
+        }
+    }
+    Ok(())
 }

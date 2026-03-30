@@ -1748,6 +1748,23 @@ pub async fn fetch_event_detail(
     }
 }
 
+// ── Sync functions (E012) ──
+
+/// Backfill `origin_machine_id` on events that don't have one yet.
+/// Returns the number of rows updated.
+#[cfg(feature = "sync")]
+pub async fn backfill_origin_machine_id(
+    pool: &SqlitePool,
+    machine_id: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let result =
+        sqlx::query("UPDATE events SET origin_machine_id = ? WHERE origin_machine_id IS NULL")
+            .bind(machine_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
