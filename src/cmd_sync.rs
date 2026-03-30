@@ -84,7 +84,7 @@ pub async fn handle(cmd: SyncCommand, pool: &SqlitePool) -> Result<(), Box<dyn E
             println!("{}", transport::format_result(&result, &remote));
             Ok(())
         }
-        SyncCommand::Status => todo!("US-0058: sync status"),
+        SyncCommand::Status => handle_status(pool).await,
     }
 }
 
@@ -186,5 +186,86 @@ async fn handle_import(pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
         "Imported {} events (skipped {}, errors {})",
         stats.events_imported, stats.events_skipped, stats.errors
     );
+    Ok(())
+}
+
+async fn handle_status(pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
+    // Local machine info
+    let machine_id = crypto::machine_id()?;
+    let local_key = crypto::local_public_key().ok();
+    let machine_name = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".into());
+
+    println!("Machine");
+    println!("  ID:     {machine_id}");
+    println!("  Name:   {machine_name}");
+    if let Some(key) = local_key {
+        println!("  Key:    {key}");
+    } else {
+        println!("  Key:    (not generated — run 'scribe sync keypair generate')");
+    }
+    println!();
+
+    // Peers
+    let peers = crate::db::get_sync_peers(pool).await?;
+    if peers.is_empty() {
+        println!("Peers");
+        println!("  (none configured)");
+    } else {
+        let max_name = peers
+            .iter()
+            .map(|p| p.machine_name.len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+
+        println!("Peers");
+        println!(
+            "  {:<width$}  {:<24}  Events Since",
+            "Name",
+            "Last Synced",
+            width = max_name
+        );
+        for peer in &peers {
+            let events_since = crate::db::count_events_since(pool, &peer.last_synced)
+                .await
+                .unwrap_or(0);
+            println!(
+                "  {:<width$}  {:<24}  {}",
+                peer.machine_name,
+                peer.last_synced,
+                events_since,
+                width = max_name
+            );
+        }
+    }
+    println!();
+
+    // Recent sync log
+    let log_entries = crate::db::get_sync_log(pool, 10).await?;
+    println!("Recent Sync Log");
+    if log_entries.is_empty() {
+        println!("  (no sync history)");
+    } else {
+        println!(
+            "  {:<24}  {:<10}  {:<14}  {:<8}  Status",
+            "Timestamp", "Direction", "Peer", "Events"
+        );
+        for entry in &log_entries {
+            let events = entry.events_sent + entry.events_received;
+            let status_str = if let Some(ref msg) = entry.error_message {
+                format!("error: {msg}")
+            } else {
+                entry.status.clone()
+            };
+            println!(
+                "  {:<24}  {:<10}  {:<14}  {:<8}  {}",
+                entry.timestamp, entry.direction, entry.peer_id, events, status_str
+            );
+        }
+    }
+
     Ok(())
 }

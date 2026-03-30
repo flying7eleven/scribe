@@ -18,6 +18,7 @@ pub struct EventRow {
     pub cwd: Option<String>,
     pub permission_mode: Option<String>,
     pub raw_payload: String,
+    pub origin_machine_id: Option<String>,
 }
 
 /// Filter parameters for querying events.
@@ -389,7 +390,7 @@ pub async fn query_events(
     filter: &EventFilter,
 ) -> Result<Vec<EventRow>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
-        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload FROM events WHERE 1=1",
+        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload, origin_machine_id FROM events WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
 
@@ -2205,6 +2206,94 @@ pub async fn rebuild_sessions(pool: &SqlitePool) -> Result<(), Box<dyn std::erro
     .await?;
 
     Ok(())
+}
+
+/// Sync peer row for status display.
+#[cfg(feature = "sync")]
+#[allow(dead_code)]
+pub struct SyncPeerRow {
+    pub machine_id: String,
+    pub machine_name: String,
+    pub public_key: String,
+    pub first_synced: String,
+    pub last_synced: String,
+}
+
+/// Sync log row for status display.
+#[cfg(feature = "sync")]
+pub struct SyncLogRow {
+    pub timestamp: String,
+    pub peer_id: String,
+    pub direction: String,
+    pub events_sent: i64,
+    pub events_received: i64,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
+/// Fetch all sync peers.
+#[cfg(feature = "sync")]
+pub async fn get_sync_peers(
+    pool: &SqlitePool,
+) -> Result<Vec<SyncPeerRow>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query(
+        "SELECT machine_id, machine_name, public_key, first_synced, last_synced \
+         FROM sync_peers ORDER BY machine_name",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SyncPeerRow {
+            machine_id: row.get("machine_id"),
+            machine_name: row.get("machine_name"),
+            public_key: row.get("public_key"),
+            first_synced: row.get("first_synced"),
+            last_synced: row.get("last_synced"),
+        })
+        .collect())
+}
+
+/// Fetch recent sync log entries.
+#[cfg(feature = "sync")]
+pub async fn get_sync_log(
+    pool: &SqlitePool,
+    limit: u32,
+) -> Result<Vec<SyncLogRow>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query(
+        "SELECT timestamp, peer_id, direction, events_sent, events_received, status, error_message \
+         FROM sync_log ORDER BY timestamp DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SyncLogRow {
+            timestamp: row.get("timestamp"),
+            peer_id: row.get("peer_id"),
+            direction: row.get("direction"),
+            events_sent: row.get("events_sent"),
+            events_received: row.get("events_received"),
+            status: row.get("status"),
+            error_message: row.get("error_message"),
+        })
+        .collect())
+}
+
+/// Count events with timestamp after the given value.
+#[cfg(feature = "sync")]
+pub async fn count_events_since(
+    pool: &SqlitePool,
+    since: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM events WHERE timestamp > ?")
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0 as u64)
 }
 
 #[cfg(test)]

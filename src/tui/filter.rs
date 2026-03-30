@@ -187,6 +187,7 @@ mod tests {
                 cwd: None,
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
+                origin_machine_id: None,
             },
             EventRow {
                 id: 2,
@@ -199,6 +200,7 @@ mod tests {
                 cwd: None,
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
+                origin_machine_id: None,
             },
         ];
 

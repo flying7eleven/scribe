@@ -116,6 +116,7 @@ fn print_events_json(events: &[EventRow]) {
             "cwd": event.cwd,
             "permission_mode": event.permission_mode,
             "raw_payload": event.raw_payload,
+            "origin_machine_id": event.origin_machine_id,
         });
         println!("{}", serde_json::to_string(&obj).unwrap());
     }
