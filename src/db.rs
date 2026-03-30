@@ -126,6 +126,30 @@ pub async fn connect(db_path: &str) -> Result<SqlitePool, Box<dyn std::error::Er
         .connect_with(options)
         .await?;
 
+    // Legacy databases (created before the migration system) may already have
+    // indexes that the initial migration tries to CREATE.  Drop them so the
+    // migration can run cleanly.  We only do this when the _sqlx_migrations
+    // table does not yet exist, i.e. migrations have never been applied.
+    let has_migrations_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_migrations_table {
+        for idx in [
+            "idx_events_session",
+            "idx_events_type",
+            "idx_events_tool",
+            "idx_events_ts",
+        ] {
+            let _ = sqlx::query(&format!("DROP INDEX IF EXISTS {idx}"))
+                .execute(&pool)
+                .await;
+        }
+    }
+
     sqlx::migrate!().run(&pool).await?;
 
     Ok(pool)
