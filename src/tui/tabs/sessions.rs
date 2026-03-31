@@ -76,11 +76,13 @@ mod tests {
     fn mock_sessions(n: usize) -> Vec<SessionRow> {
         (0..n)
             .map(|i| SessionRow {
+                account_id: "default".to_string(),
                 session_id: format!("sess-{i}"),
                 first_seen: "2025-06-01T10:00:00Z".to_string(),
                 last_seen: "2025-06-01T12:00:00Z".to_string(),
                 cwd: Some("/tmp".to_string()),
                 event_count: (i as i64 + 1) * 10,
+                account_email: None,
             })
             .collect()
     }

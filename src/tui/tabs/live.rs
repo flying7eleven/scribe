@@ -168,6 +168,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
                 origin_machine_id: None,
+                account_id: "default".to_string(),
+                account_email: None,
             });
         }
 
@@ -199,6 +201,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
                 origin_machine_id: None,
+                account_id: "default".to_string(),
+                account_email: None,
             });
         }
         state.feed_scroll = 9;

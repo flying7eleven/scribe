@@ -19,6 +19,10 @@ pub struct EventRow {
     pub permission_mode: Option<String>,
     pub raw_payload: String,
     pub origin_machine_id: Option<String>,
+    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
+    pub account_id: String,
+    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
+    pub account_email: Option<String>,
 }
 
 /// Filter parameters for querying events.
@@ -46,11 +50,15 @@ impl EventFilter {
 /// A row from the `sessions` table.
 #[derive(Debug, FromRow)]
 pub struct SessionRow {
+    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
+    pub account_id: String,
     pub session_id: String,
     pub first_seen: String,
     pub last_seen: String,
     pub cwd: Option<String>,
     pub event_count: i64,
+    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
+    pub account_email: Option<String>,
 }
 
 /// Filter parameters for querying sessions.
@@ -186,8 +194,8 @@ pub async fn insert_event(
     let mut tx = pool.begin().await?;
 
     let result = sqlx::query(
-        "INSERT INTO events (session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload, account_id, account_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(session_id)
     .bind(event_type)
@@ -197,19 +205,22 @@ pub async fn insert_event(
     .bind(cwd)
     .bind(hook_input.permission_mode.as_deref())
     .bind(raw_payload)
+    .bind("default")
+    .bind(None::<&str>)
     .execute(&mut *tx)
     .await?;
 
     let event_id = result.last_insert_rowid();
 
     sqlx::query(
-        "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count)
-         VALUES (?, ?, ?, ?, 1)
-         ON CONFLICT(session_id) DO UPDATE SET
+        "INSERT INTO sessions (account_id, session_id, first_seen, last_seen, cwd, event_count)
+         VALUES (?, ?, ?, ?, ?, 1)
+         ON CONFLICT(account_id, session_id) DO UPDATE SET
            last_seen = excluded.last_seen,
            cwd = excluded.cwd,
            event_count = event_count + 1",
     )
+    .bind("default")
     .bind(session_id)
     .bind(&now)
     .bind(&now)
@@ -414,7 +425,7 @@ pub async fn query_events(
     filter: &EventFilter,
 ) -> Result<Vec<EventRow>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
-        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload, origin_machine_id FROM events WHERE 1=1",
+        "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, tool_response, cwd, permission_mode, raw_payload, origin_machine_id, account_id, account_email FROM events WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
 
@@ -461,7 +472,7 @@ pub async fn query_sessions(
     filter: &SessionFilter,
 ) -> Result<Vec<SessionRow>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
-        "SELECT session_id, first_seen, last_seen, cwd, event_count FROM sessions WHERE 1=1",
+        "SELECT account_id, session_id, first_seen, last_seen, cwd, event_count, account_email FROM sessions WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
 
@@ -503,7 +514,7 @@ pub async fn delete_orphaned_sessions(
     pool: &SqlitePool,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let result = sqlx::query(
-        "DELETE FROM sessions WHERE session_id NOT IN (SELECT DISTINCT session_id FROM events)",
+        "DELETE FROM sessions WHERE (account_id, session_id) NOT IN (SELECT DISTINCT account_id, session_id FROM events)",
     )
     .execute(pool)
     .await?;
@@ -1942,7 +1953,8 @@ pub async fn export_events_since(
     let rows = if let Some(since) = since {
         sqlx::query(
             "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, \
-             tool_response, cwd, permission_mode, raw_payload, origin_machine_id \
+             tool_response, cwd, permission_mode, raw_payload, origin_machine_id, \
+             account_id, account_email \
              FROM events WHERE timestamp > ? ORDER BY timestamp ASC",
         )
         .bind(since)
@@ -1951,7 +1963,8 @@ pub async fn export_events_since(
     } else {
         sqlx::query(
             "SELECT id, timestamp, session_id, event_type, tool_name, tool_input, \
-             tool_response, cwd, permission_mode, raw_payload, origin_machine_id \
+             tool_response, cwd, permission_mode, raw_payload, origin_machine_id, \
+             account_id, account_email \
              FROM events ORDER BY timestamp ASC",
         )
         .fetch_all(pool)
@@ -1973,6 +1986,8 @@ pub async fn export_events_since(
                 permission_mode: row.get("permission_mode"),
                 raw_payload: row.get("raw_payload"),
                 origin_machine_id: row.get("origin_machine_id"),
+                account_id: row.get("account_id"),
+                account_email: row.get("account_email"),
             };
             (id, event)
         })
@@ -2261,13 +2276,15 @@ pub async fn get_event_enforcements(
 #[cfg(feature = "sync")]
 pub async fn check_event_exists(
     pool: &SqlitePool,
+    account_id: &str,
     session_id: &str,
     timestamp: &str,
     event_type: &str,
 ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
     let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM events WHERE session_id = ? AND timestamp = ? AND event_type = ?",
+        "SELECT id FROM events WHERE account_id = ? AND session_id = ? AND timestamp = ? AND event_type = ?",
     )
+    .bind(account_id)
     .bind(session_id)
     .bind(timestamp)
     .bind(event_type)
@@ -2285,8 +2302,8 @@ pub async fn insert_synced_event(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let result = sqlx::query(
         "INSERT INTO events (timestamp, session_id, event_type, tool_name, tool_input, \
-         tool_response, cwd, permission_mode, raw_payload, origin_machine_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         tool_response, cwd, permission_mode, raw_payload, origin_machine_id, account_id, account_email) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&event.timestamp)
     .bind(&event.session_id)
@@ -2298,6 +2315,8 @@ pub async fn insert_synced_event(
     .bind(&event.permission_mode)
     .bind(&event.raw_payload)
     .bind(&event.origin_machine_id)
+    .bind(event.account_id.as_deref().unwrap_or("default"))
+    .bind(event.account_email.as_deref())
     .execute(pool)
     .await?;
     Ok(result.last_insert_rowid())
@@ -2355,17 +2374,22 @@ pub async fn rebuild_sessions(pool: &SqlitePool) -> Result<(), Box<dyn std::erro
     sqlx::query("DELETE FROM sessions").execute(pool).await?;
 
     sqlx::query(
-        "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) \
+        "INSERT INTO sessions (account_id, session_id, first_seen, last_seen, cwd, event_count, account_email) \
          SELECT \
+             account_id, \
              session_id, \
              MIN(timestamp) AS first_seen, \
              MAX(timestamp) AS last_seen, \
              (SELECT cwd FROM events e2 \
-              WHERE e2.session_id = events.session_id \
+              WHERE e2.account_id = events.account_id AND e2.session_id = events.session_id \
               ORDER BY e2.timestamp DESC LIMIT 1) AS cwd, \
-             COUNT(*) AS event_count \
+             COUNT(*) AS event_count, \
+             (SELECT account_email FROM events e3 \
+              WHERE e3.account_id = events.account_id AND e3.session_id = events.session_id \
+              AND e3.account_email IS NOT NULL \
+              ORDER BY e3.timestamp DESC LIMIT 1) AS account_email \
          FROM events \
-         GROUP BY session_id",
+         GROUP BY account_id, session_id",
     )
     .execute(pool)
     .await?;
@@ -2704,7 +2728,9 @@ mod tests {
                 "cwd",
                 "permission_mode",
                 "raw_payload",
-                "origin_machine_id"
+                "origin_machine_id",
+                "account_id",
+                "account_email"
             ]
         );
 
@@ -2717,15 +2743,17 @@ mod tests {
         assert_eq!(
             columns,
             vec![
+                "account_id",
                 "session_id",
                 "first_seen",
                 "last_seen",
                 "cwd",
-                "event_count"
+                "event_count",
+                "account_email"
             ]
         );
 
-        // Verify all five indexes on events (including cwd index from E006 migration)
+        // Verify all indexes on events (including cwd, account, and dedup)
         let indexes: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name LIKE 'idx_%' ORDER BY name",
         )
@@ -2735,6 +2763,7 @@ mod tests {
         assert_eq!(
             indexes,
             vec![
+                "idx_events_account",
                 "idx_events_cwd",
                 "idx_events_dedup",
                 "idx_events_session",
@@ -3020,7 +3049,7 @@ mod tests {
 
             // Upsert session
             sqlx::query(
-                "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, ?, 1) ON CONFLICT(session_id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, event_count = event_count + 1",
+                "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, ?, 1) ON CONFLICT(account_id, session_id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, event_count = event_count + 1",
             )
             .bind(session)
             .bind(ts)

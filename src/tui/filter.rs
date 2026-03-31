@@ -144,18 +144,22 @@ mod tests {
     fn test_filter_sessions() {
         let sessions = vec![
             SessionRow {
+                account_id: "default".to_string(),
                 session_id: "sess-abc".to_string(),
                 first_seen: "2025-06-01T10:00:00Z".to_string(),
                 last_seen: "2025-06-01T12:00:00Z".to_string(),
                 cwd: Some("/home/user/project".to_string()),
                 event_count: 10,
+                account_email: None,
             },
             SessionRow {
+                account_id: "default".to_string(),
                 session_id: "sess-xyz".to_string(),
                 first_seen: "2025-06-02T10:00:00Z".to_string(),
                 last_seen: "2025-06-02T12:00:00Z".to_string(),
                 cwd: Some("/tmp".to_string()),
                 event_count: 5,
+                account_email: None,
             },
         ];
 
@@ -188,6 +192,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
                 origin_machine_id: None,
+                account_id: "default".to_string(),
+                account_email: None,
             },
             EventRow {
                 id: 2,
@@ -201,6 +207,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".to_string(),
                 origin_machine_id: None,
+                account_id: "default".to_string(),
+                account_email: None,
             },
         ];
 

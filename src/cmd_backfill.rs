@@ -501,7 +501,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count)
              VALUES (?, datetime('now'), datetime('now'), '/tmp', 1)
-             ON CONFLICT(session_id) DO UPDATE SET event_count = event_count + 1",
+             ON CONFLICT(account_id, session_id) DO UPDATE SET event_count = event_count + 1",
         )
         .bind(session_id)
         .execute(pool)

@@ -38,6 +38,14 @@ pub struct EventRow {
     pub permission_mode: Option<String>,
     pub raw_payload: String,
     pub origin_machine_id: Option<String>,
+    #[serde(default = "default_account_id")]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_email: Option<String>,
+}
+
+fn default_account_id() -> Option<String> {
+    Some("default".to_string())
 }
 
 // ── Detail structs (one per detail table, excludes event_id) ──
@@ -258,6 +266,8 @@ mod tests {
                 permission_mode: Some("default".into()),
                 raw_payload: r#"{"session_id":"sess-123"}"#.into(),
                 origin_machine_id: Some("machine-uuid".into()),
+                account_id: Some("default".into()),
+                account_email: None,
             },
             tool_details: Some(ToolEventDetails {
                 tool_use_id: Some("tu-001".into()),
@@ -312,6 +322,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".into(),
                 origin_machine_id: None,
+                account_id: Some("default".into()),
+                account_email: None,
             },
             tool_details: None,
             stop_details: Some(StopEventDetails {
@@ -371,6 +383,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".into(),
                 origin_machine_id: None,
+                account_id: Some("default".into()),
+                account_email: None,
             },
             tool_details: None,
             stop_details: None,

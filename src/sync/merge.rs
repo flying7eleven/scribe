@@ -62,6 +62,7 @@ async fn merge_single_bundle(
     // Dedup check
     let existing = crate::db::check_event_exists(
         pool,
+        bundle.event.account_id.as_deref().unwrap_or("default"),
         &bundle.event.session_id,
         &bundle.event.timestamp,
         &bundle.event.event_type,
@@ -320,6 +321,8 @@ mod tests {
                 permission_mode: None,
                 raw_payload: "{}".into(),
                 origin_machine_id: Some("remote-machine".into()),
+                account_id: Some("default".into()),
+                account_email: None,
             },
             tool_details: None,
             stop_details: None,

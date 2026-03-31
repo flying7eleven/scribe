@@ -378,6 +378,8 @@ mod tests {
                 r#"{"session_id":"sess-abc123","hook_event_name":"PreToolUse","tool_name":"Bash"}"#
                     .to_string(),
             origin_machine_id: None,
+            account_id: "default".to_string(),
+            account_email: None,
         }
     }
 

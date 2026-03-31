@@ -72,7 +72,7 @@ mod tests {
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, '/tmp', 1) ON CONFLICT(session_id) DO UPDATE SET last_seen = excluded.last_seen, event_count = event_count + 1",
+            "INSERT INTO sessions (session_id, first_seen, last_seen, cwd, event_count) VALUES (?, ?, ?, '/tmp', 1) ON CONFLICT(account_id, session_id) DO UPDATE SET last_seen = excluded.last_seen, event_count = event_count + 1",
         )
         .bind(session)
         .bind(ts)
