@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-beta4] - 2026-03-31
+
+### Added
+- Add TaskCreated event support ([9ada2dc])
+- Add CwdChanged event support ([0fff175])
+- Add FileChanged event support ([f3743c4])
+- Add WorktreeCreate event support ([775d6ba])
+- Add dynamic version display via git describe ([448513c])
+- Add account schema migration and composite session PK ([9a9ccab])
+- Resolve account from claude auth status on SessionStart ([9e3d9a8])
+- Add --account filtering to query, stats, and usage commands ([8e3cdaa])
+- Add TUI account column, detail panel, and selector overlay ([05ff1c9])
+- Add scribe account list subcommand ([65d63dc])
+
+### Fixed
+- Fix idempotent hook merge in scribe init ([40ab1e3])
+- Fix initial migration failing on existing databases ([13cb549])
+- Fix migration checksum mismatch by dropping legacy indexes before migrate ([9ac62d9])
+- Add missing account field to EventFilter in classify command ([18c06b0])
+
+[9ada2dc]: https://github.com/flying7eleven/scribe/commit/9ada2dc21c61f339475418763769d88543736fc2
+[0fff175]: https://github.com/flying7eleven/scribe/commit/0fff175ab7adc9a947d586fcb3a91672de2eebec
+[f3743c4]: https://github.com/flying7eleven/scribe/commit/f3743c40c4d60fc9889c45890234a4034e877db6
+[775d6ba]: https://github.com/flying7eleven/scribe/commit/775d6bafead0a5017dcb6ba037bd14c30e38f8ab
+[448513c]: https://github.com/flying7eleven/scribe/commit/448513cad0a34003f74099e0fb4c72c6b27e3322
+[9a9ccab]: https://github.com/flying7eleven/scribe/commit/9a9ccab5b161bffb70568629c5bf8ee019be7677
+[9e3d9a8]: https://github.com/flying7eleven/scribe/commit/9e3d9a80b6a385384af2c2b5d942c52e49762728
+[8e3cdaa]: https://github.com/flying7eleven/scribe/commit/8e3cdaa059942bafb7192f022713f419218249d7
+[05ff1c9]: https://github.com/flying7eleven/scribe/commit/05ff1c96c1cb4d2f0baa458a1c7422db8f13e047
+[65d63dc]: https://github.com/flying7eleven/scribe/commit/65d63dc75b6ae7cb929f4222d6b7f1cdbfeb0775
+[40ab1e3]: https://github.com/flying7eleven/scribe/commit/40ab1e3e217a82f08a881e867f13aad46d037f89
+[13cb549]: https://github.com/flying7eleven/scribe/commit/13cb54973c8782c2cd6245021e336bcf2bdf0d8c
+[9ac62d9]: https://github.com/flying7eleven/scribe/commit/9ac62d9ff181602b0768657314bb07f1a7baa796
+[18c06b0]: https://github.com/flying7eleven/scribe/commit/18c06b04f3a263360904ea0582dd80cb1aef078e
+
 ## [1.0.0-beta3] - 2026-03-29
 
 ### Added
