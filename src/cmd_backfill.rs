@@ -528,6 +528,8 @@ mod tests {
             &pool,
             &hook,
             r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/tmp","tool_name":"Bash","tool_use_id":"tu-1"}"#,
+            "default",
+            None,
         )
         .await
         .unwrap();

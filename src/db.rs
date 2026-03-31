@@ -171,6 +171,8 @@ pub async fn insert_event(
     pool: &SqlitePool,
     hook_input: &crate::models::HookInput,
     raw_payload: &str,
+    account_id: &str,
+    account_email: Option<&str>,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -205,26 +207,28 @@ pub async fn insert_event(
     .bind(cwd)
     .bind(hook_input.permission_mode.as_deref())
     .bind(raw_payload)
-    .bind("default")
-    .bind(None::<&str>)
+    .bind(account_id)
+    .bind(account_email)
     .execute(&mut *tx)
     .await?;
 
     let event_id = result.last_insert_rowid();
 
     sqlx::query(
-        "INSERT INTO sessions (account_id, session_id, first_seen, last_seen, cwd, event_count)
-         VALUES (?, ?, ?, ?, ?, 1)
+        "INSERT INTO sessions (account_id, session_id, first_seen, last_seen, cwd, event_count, account_email)
+         VALUES (?, ?, ?, ?, ?, 1, ?)
          ON CONFLICT(account_id, session_id) DO UPDATE SET
            last_seen = excluded.last_seen,
            cwd = excluded.cwd,
-           event_count = event_count + 1",
+           event_count = event_count + 1,
+           account_email = COALESCE(excluded.account_email, sessions.account_email)",
     )
-    .bind("default")
+    .bind(account_id)
     .bind(session_id)
     .bind(&now)
     .bind(&now)
     .bind(cwd)
+    .bind(account_email)
     .execute(&mut *tx)
     .await?;
 
@@ -416,7 +420,24 @@ pub async fn insert_test_event(
         permission_mode: permission_mode.map(String::from),
         ..Default::default()
     };
-    insert_event(pool, &hook, raw_payload).await
+    insert_event(pool, &hook, raw_payload, "default", None).await
+}
+
+/// Look up the account for an existing session by session_id.
+/// Returns `(account_id, account_email)` or `("default", None)` if not found.
+pub async fn lookup_session_account(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> (String, Option<String>) {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT account_id, account_email FROM sessions WHERE session_id = ? LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    row.unwrap_or_else(|| ("default".to_string(), None))
 }
 
 /// Query events with dynamic filters, ordered by timestamp descending.
@@ -2621,7 +2642,7 @@ mod tests {
             tool_use_id: Some("tu-123".to_string()),
             ..Default::default()
         };
-        let event_id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let event_id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         // Verify detail row exists
         let detail_count: i64 =
@@ -2672,7 +2693,7 @@ mod tests {
             model: Some("claude-sonnet".to_string()),
             ..Default::default()
         };
-        let event_id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let event_id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         // Verify session_event_details row exists
         let count: i64 =
@@ -3678,7 +3699,7 @@ mod tests {
             tool_use_id: Some("tu-123".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query("SELECT tool_use_id FROM tool_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3704,7 +3725,7 @@ mod tests {
             is_interrupt: Some(true),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT error, error_details, is_interrupt FROM tool_event_details WHERE event_id = ?",
@@ -3735,7 +3756,7 @@ mod tests {
             permission_suggestions: Some(serde_json::json!({"allow": true})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row =
             sqlx::query("SELECT permission_suggestions FROM tool_event_details WHERE event_id = ?")
@@ -3760,7 +3781,7 @@ mod tests {
             error_details: Some("too many requests".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row =
             sqlx::query("SELECT error, error_details FROM stop_event_details WHERE event_id = ?")
@@ -3789,7 +3810,7 @@ mod tests {
             last_assistant_message: Some("done".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT stop_hook_active, last_assistant_message FROM stop_event_details WHERE event_id = ?",
@@ -3816,7 +3837,7 @@ mod tests {
             stop_hook_active: Some(true),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query("SELECT stop_hook_active FROM stop_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3837,7 +3858,7 @@ mod tests {
             model: Some("claude-sonnet-4-5-20250514".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query("SELECT source, model FROM session_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3864,7 +3885,7 @@ mod tests {
             reason: Some("clear".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query("SELECT reason FROM session_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3889,7 +3910,7 @@ mod tests {
             file_path: Some("/home/.claude/settings.json".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT source, model, file_path FROM session_event_details WHERE event_id = ?",
@@ -3921,7 +3942,7 @@ mod tests {
             cwd: "/tmp".into(),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         // No row in any Tier 1 detail table
         let tool_count: i64 =
@@ -3959,7 +3980,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "ls"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, r#"{"raw":true}"#).await.unwrap();
+        let eid = insert_event(&pool, &hook, r#"{"raw":true}"#, "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT e.event_type, e.tool_name, d.tool_use_id
@@ -3991,8 +4012,8 @@ mod tests {
             cwd: "/tmp".into(),
             ..Default::default()
         };
-        let id1 = insert_event(&pool, &hook, "{}").await.unwrap();
-        let id2 = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id1 = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id2 = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
         assert!(id1 > 0);
         assert!(id2 > id1);
     }
@@ -4010,7 +4031,7 @@ mod tests {
             agent_type: Some("Explore".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
@@ -4046,7 +4067,7 @@ mod tests {
             last_assistant_message: Some("done".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         // Verify stop_event_details
         let stop_row =
@@ -4102,7 +4123,7 @@ mod tests {
             message: Some("Please confirm".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT notification_type, title, message FROM notification_event_details WHERE event_id = ?",
@@ -4139,7 +4160,7 @@ mod tests {
             requested_schema: Some(serde_json::json!({"type": "object"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT elicitation_id, mcp_server_name, mode, url, requested_schema FROM notification_event_details WHERE event_id = ?",
@@ -4182,7 +4203,7 @@ mod tests {
             content: Some(serde_json::json!({"field": "value"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT action, content FROM notification_event_details WHERE event_id = ?",
@@ -4212,7 +4233,7 @@ mod tests {
             custom_instructions: Some("keep it short".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT `trigger`, custom_instructions, compact_summary FROM compact_event_details WHERE event_id = ?",
@@ -4244,7 +4265,7 @@ mod tests {
             compact_summary: Some("summarized".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT `trigger`, compact_summary FROM compact_event_details WHERE event_id = ?",
@@ -4278,7 +4299,7 @@ mod tests {
             parent_file_path: Some("/parent".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path FROM instruction_event_details WHERE event_id = ?",
@@ -4323,7 +4344,7 @@ mod tests {
             team_name: Some("alpha".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT teammate_name, team_name FROM team_event_details WHERE event_id = ?",
@@ -4356,7 +4377,7 @@ mod tests {
             task_description: Some("fixed the null pointer".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query(
             "SELECT task_id, task_subject, task_description FROM team_event_details WHERE event_id = ?",
@@ -4389,7 +4410,7 @@ mod tests {
             prompt: Some("hello world".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row = sqlx::query("SELECT prompt FROM prompt_event_details WHERE event_id = ?")
             .bind(eid)
@@ -4412,7 +4433,7 @@ mod tests {
             worktree_path: Some("/worktree/feature-x".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}").await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let row =
             sqlx::query("SELECT worktree_path FROM worktree_event_details WHERE event_id = ?")
@@ -4439,7 +4460,7 @@ mod tests {
                 model: Some("claude-sonnet-4-20250514".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, "{}").await.unwrap();
+            insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
         }
         let hook = crate::models::HookInput {
             session_id: "opus-session-1".into(),
@@ -4448,7 +4469,7 @@ mod tests {
             model: Some("claude-opus-4-20250514".into()),
             ..Default::default()
         };
-        insert_event(&pool, &hook, "{}").await.unwrap();
+        insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let results = sessions_by_model(&pool, None).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -4480,7 +4501,7 @@ mod tests {
                 error: Some("timeout".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, "{}").await.unwrap();
+            insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
         }
         let hook = crate::models::HookInput {
             session_id: "s3".into(),
@@ -4490,7 +4511,7 @@ mod tests {
             error: Some("not_found".into()),
             ..Default::default()
         };
-        insert_event(&pool, &hook, "{}").await.unwrap();
+        insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let results = tool_failures_by_error(&pool, None).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -4517,7 +4538,7 @@ mod tests {
                 error: Some("context_limit".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, r#"{"error":"context_limit"}"#)
+            insert_event(&pool, &hook, r#"{"error":"context_limit"}"#, "default", None)
                 .await
                 .unwrap();
         }
@@ -4528,7 +4549,7 @@ mod tests {
             error: Some("timeout".into()),
             ..Default::default()
         };
-        insert_event(&pool, &hook, r#"{"error":"timeout"}"#)
+        insert_event(&pool, &hook, r#"{"error":"timeout"}"#, "default", None)
             .await
             .unwrap();
 
@@ -4592,7 +4613,7 @@ mod tests {
             tool_use_id: Some("tu-001".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let detail = fetch_event_detail(&pool, id, "PreToolUse").await.unwrap();
         assert!(detail.is_some());
@@ -4617,7 +4638,7 @@ mod tests {
             stop_hook_active: Some(true),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let detail = fetch_event_detail(&pool, id, "StopFailure").await.unwrap();
         assert!(detail.is_some());
@@ -4645,7 +4666,7 @@ mod tests {
             agent_transcript_path: Some("/tmp/transcript.json".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let detail = fetch_event_detail(&pool, id, "SubagentStop").await.unwrap();
         assert!(detail.is_some());
@@ -4685,7 +4706,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}").await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
 
         let detail = fetch_event_detail(&pool, id, "SessionStart").await.unwrap();
         assert!(detail.is_some());

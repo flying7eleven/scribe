@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Read};
+use std::process::Command;
 
 use chrono::Utc;
 use sqlx::SqlitePool;
@@ -10,6 +11,58 @@ use crate::models::HookInput;
 pub struct RetentionConfig {
     pub retention: String,
     pub check_interval: String,
+}
+
+/// Resolved account information for an event.
+struct ResolvedAccount {
+    account_id: String,
+    account_email: Option<String>,
+}
+
+/// Resolve the active Claude Code account by running `claude auth status --json`.
+/// Returns `("default", None)` on any failure (CLI not found, timeout, parse error).
+fn resolve_account_from_cli() -> ResolvedAccount {
+    let result = Command::new("claude")
+        .args(["auth", "status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let output = match result {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return ResolvedAccount { account_id: "default".to_string(), account_email: None },
+    };
+
+    let json: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(v) => v,
+        Err(_) => return ResolvedAccount { account_id: "default".to_string(), account_email: None },
+    };
+
+    let org_id = json.get("orgId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
+
+    let email = json.get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    ResolvedAccount {
+        account_id: org_id.to_string(),
+        account_email: email,
+    }
+}
+
+/// Resolve account for an event: call CLI on SessionStart, look up DB for others.
+async fn resolve_account(pool: &SqlitePool, input: &HookInput) -> ResolvedAccount {
+    if input.hook_event_name == "SessionStart" {
+        resolve_account_from_cli()
+    } else {
+        let (account_id, account_email) = db::lookup_session_account(pool, &input.session_id).await;
+        ResolvedAccount { account_id, account_email }
+    }
 }
 
 /// Read hook JSON from stdin and insert into the database.
@@ -67,8 +120,11 @@ pub async fn process_payload(
         }
     };
 
-    // Insert into DB (insert_event now accepts &HookInput directly)
-    db::insert_event(pool, &input, raw).await?;
+    // Resolve account: CLI call on SessionStart, DB lookup for others
+    let account = resolve_account(pool, &input).await;
+
+    // Insert into DB with resolved account
+    db::insert_event(pool, &input, raw, &account.account_id, account.account_email.as_deref()).await?;
 
     // Auto-retention: if configured, maybe clean up expired events
     if let Some(ret) = retention {
