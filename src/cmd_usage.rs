@@ -41,6 +41,7 @@ pub async fn run(
     pool: &SqlitePool,
     window: &str,
     weekly: &str,
+    account: Option<&str>,
     json: bool,
 ) -> Result<(), Box<dyn Error>> {
     let now = chrono::Utc::now();
@@ -48,10 +49,10 @@ pub async fn run(
     let window_since = compute_since(&now, window)?;
     let weekly_since = compute_since(&now, weekly)?;
 
-    let summary = db::token_usage_summary(pool, &window_since).await?;
-    let weekly_summary = db::token_usage_summary(pool, &weekly_since).await?;
-    let by_model = db::token_usage_by_model(pool, &window_since).await?;
-    let by_tool = db::token_usage_by_tool(pool, &window_since, 5).await?;
+    let summary = db::token_usage_summary(pool, &window_since, account).await?;
+    let weekly_summary = db::token_usage_summary(pool, &weekly_since, account).await?;
+    let by_model = db::token_usage_by_model(pool, &window_since, account).await?;
+    let by_tool = db::token_usage_by_tool(pool, &window_since, 5, account).await?;
 
     if json {
         print_json(

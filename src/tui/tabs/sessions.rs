@@ -25,6 +25,7 @@ impl SessionsState {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let filter = db::SessionFilter {
             since: since.map(String::from),
+            account: None,
             limit: 500,
         };
         self.sessions = db::query_sessions(pool, &filter).await?;

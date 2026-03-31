@@ -46,6 +46,7 @@ impl EventsState {
             event_type: None,
             tool_name: None,
             search: None,
+            account: None,
             limit: 500,
         };
         self.events = db::query_events(pool, &filter).await?;

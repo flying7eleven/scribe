@@ -31,20 +31,32 @@ fn resolve_account_from_cli() -> ResolvedAccount {
 
     let output = match result {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return ResolvedAccount { account_id: "default".to_string(), account_email: None },
+        _ => {
+            return ResolvedAccount {
+                account_id: "default".to_string(),
+                account_email: None,
+            }
+        }
     };
 
     let json: serde_json::Value = match serde_json::from_slice(&output) {
         Ok(v) => v,
-        Err(_) => return ResolvedAccount { account_id: "default".to_string(), account_email: None },
+        Err(_) => {
+            return ResolvedAccount {
+                account_id: "default".to_string(),
+                account_email: None,
+            }
+        }
     };
 
-    let org_id = json.get("orgId")
+    let org_id = json
+        .get("orgId")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("default");
 
-    let email = json.get("email")
+    let email = json
+        .get("email")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
@@ -61,7 +73,10 @@ async fn resolve_account(pool: &SqlitePool, input: &HookInput) -> ResolvedAccoun
         resolve_account_from_cli()
     } else {
         let (account_id, account_email) = db::lookup_session_account(pool, &input.session_id).await;
-        ResolvedAccount { account_id, account_email }
+        ResolvedAccount {
+            account_id,
+            account_email,
+        }
     }
 }
 
@@ -124,7 +139,14 @@ pub async fn process_payload(
     let account = resolve_account(pool, &input).await;
 
     // Insert into DB with resolved account
-    db::insert_event(pool, &input, raw, &account.account_id, account.account_email.as_deref()).await?;
+    db::insert_event(
+        pool,
+        &input,
+        raw,
+        &account.account_id,
+        account.account_email.as_deref(),
+    )
+    .await?;
 
     // Auto-retention: if configured, maybe clean up expired events
     if let Some(ret) = retention {

@@ -299,7 +299,7 @@ fn test_query_sessions_csv() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert!(lines[0].contains("session_id,first_seen"));
+    assert!(lines[0].contains("session_id,account_id"));
     assert!(lines[0].contains("duration"));
 }
 

@@ -49,15 +49,15 @@ impl StatsState {
         db_path: &str,
         since: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.stats = Some(db::get_stats(pool, since).await?);
-        self.avg_duration = db::avg_session_duration(pool, since, None).await?;
-        self.tools = db::top_tools(pool, since, 10).await?;
-        self.event_types = db::event_type_breakdown(pool, since).await?;
-        self.errors = Some(db::error_summary(pool, since).await?);
-        self.dirs = db::top_directories(pool, since, 5).await?;
-        let raw_activity = db::daily_activity(pool, since).await?;
+        self.stats = Some(db::get_stats(pool, since, None).await?);
+        self.avg_duration = db::avg_session_duration(pool, since, None, None).await?;
+        self.tools = db::top_tools(pool, since, 10, None).await?;
+        self.event_types = db::event_type_breakdown(pool, since, None).await?;
+        self.errors = Some(db::error_summary(pool, since, None).await?);
+        self.dirs = db::top_directories(pool, since, 5, None).await?;
+        let raw_activity = db::daily_activity(pool, since, None).await?;
         self.activity = crate::cmd_stats::fill_zero_days(&raw_activity);
-        self.models = db::sessions_by_model(pool, since).await?;
+        self.models = db::sessions_by_model(pool, since, None).await?;
         self.tool_failures = db::tool_failures_by_error(pool, since).await?;
         self.db_path = db_path.to_string();
         self.db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);

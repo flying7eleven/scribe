@@ -19,9 +19,7 @@ pub struct EventRow {
     pub permission_mode: Option<String>,
     pub raw_payload: String,
     pub origin_machine_id: Option<String>,
-    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
     pub account_id: String,
-    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
     pub account_email: Option<String>,
 }
 
@@ -34,6 +32,7 @@ pub struct EventFilter {
     pub event_type: Option<String>,
     pub tool_name: Option<String>,
     pub search: Option<String>,
+    pub account: Option<String>,
     pub limit: i64,
 }
 
@@ -50,14 +49,12 @@ impl EventFilter {
 /// A row from the `sessions` table.
 #[derive(Debug, FromRow)]
 pub struct SessionRow {
-    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
     pub account_id: String,
     pub session_id: String,
     pub first_seen: String,
     pub last_seen: String,
     pub cwd: Option<String>,
     pub event_count: i64,
-    #[allow(dead_code)] // used in US-0066 (query filtering) and US-0067 (TUI)
     pub account_email: Option<String>,
 }
 
@@ -65,6 +62,7 @@ pub struct SessionRow {
 #[derive(Default)]
 pub struct SessionFilter {
     pub since: Option<String>,
+    pub account: Option<String>,
     pub limit: i64,
 }
 
@@ -440,6 +438,85 @@ pub async fn lookup_session_account(
     row.unwrap_or_else(|| ("default".to_string(), None))
 }
 
+/// Resolve an --account flag value (which may be an email or orgId) to an account_id.
+/// Checks sessions table for a matching account_email first, then falls back to using
+/// the value as-is (it may be an orgId).
+pub async fn resolve_account_filter(
+    pool: &SqlitePool,
+    input: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // Check if input matches an email in sessions table
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT account_id FROM sessions WHERE account_email = ? LIMIT 1")
+            .bind(input)
+            .fetch_optional(pool)
+            .await?;
+
+    if let Some((account_id,)) = row {
+        return Ok(account_id);
+    }
+
+    // Use as-is (assume it's an orgId)
+    Ok(input.to_string())
+}
+
+/// Per-account event and session counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountBreakdown {
+    pub account_id: String,
+    pub account_email: Option<String>,
+    pub event_count: i64,
+    pub session_count: i64,
+}
+
+/// Get per-account breakdown of events and sessions.
+pub async fn account_breakdown(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> Result<Vec<AccountBreakdown>, Box<dyn std::error::Error>> {
+    let (events, sessions) = if let Some(since) = since {
+        let events: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT account_id, account_email, COUNT(*) as cnt FROM events WHERE timestamp >= ? GROUP BY account_id ORDER BY cnt DESC",
+        )
+        .bind(since)
+        .fetch_all(pool)
+        .await?;
+        let sessions: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT account_id, COUNT(*) as cnt FROM sessions WHERE last_seen >= ? GROUP BY account_id",
+        )
+        .bind(since)
+        .fetch_all(pool)
+        .await?;
+        (events, sessions)
+    } else {
+        let events: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT account_id, account_email, COUNT(*) as cnt FROM events GROUP BY account_id ORDER BY cnt DESC",
+        )
+        .fetch_all(pool)
+        .await?;
+        let sessions: Vec<(String, i64)> =
+            sqlx::query_as("SELECT account_id, COUNT(*) as cnt FROM sessions GROUP BY account_id")
+                .fetch_all(pool)
+                .await?;
+        (events, sessions)
+    };
+
+    let session_map: std::collections::HashMap<String, i64> = sessions.into_iter().collect();
+
+    Ok(events
+        .into_iter()
+        .map(|(account_id, account_email, event_count)| {
+            let session_count = session_map.get(&account_id).copied().unwrap_or(0);
+            AccountBreakdown {
+                account_id,
+                account_email,
+                event_count,
+                session_count,
+            }
+        })
+        .collect())
+}
+
 /// Query events with dynamic filters, ordered by timestamp descending.
 pub async fn query_events(
     pool: &SqlitePool,
@@ -474,6 +551,10 @@ pub async fn query_events(
         sql.push_str(" AND tool_input LIKE '%' || ? || '%'");
         binds.push(search.clone());
     }
+    if let Some(ref account) = filter.account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.clone());
+    }
 
     sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
     binds.push(filter.limit.to_string());
@@ -500,6 +581,10 @@ pub async fn query_sessions(
     if let Some(ref since) = filter.since {
         sql.push_str(" AND last_seen >= ?");
         binds.push(since.clone());
+    }
+    if let Some(ref account) = filter.account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.clone());
     }
 
     sql.push_str(" ORDER BY last_seen DESC LIMIT ?");
@@ -582,46 +667,76 @@ pub struct DbStats {
 pub async fn get_stats(
     pool: &SqlitePool,
     since: Option<&str>,
+    account: Option<&str>,
 ) -> Result<DbStats, Box<dyn std::error::Error>> {
-    let (event_count, oldest_event, newest_event) = if let Some(since) = since {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE timestamp >= ?")
-            .bind(since)
-            .fetch_one(pool)
-            .await?;
-        let oldest: Option<String> =
-            sqlx::query_scalar("SELECT MIN(timestamp) FROM events WHERE timestamp >= ?")
-                .bind(since)
-                .fetch_one(pool)
-                .await?;
-        let newest: Option<String> =
-            sqlx::query_scalar("SELECT MAX(timestamp) FROM events WHERE timestamp >= ?")
-                .bind(since)
-                .fetch_one(pool)
-                .await?;
-        (count, oldest, newest)
+    // Build WHERE clause for events
+    let mut conditions: Vec<&str> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        conditions.push("timestamp >= ?");
+        binds.push(since.to_string());
+    }
+    if let Some(account) = account {
+        conditions.push("account_id = ?");
+        binds.push(account.to_string());
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
     } else {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
-            .fetch_one(pool)
-            .await?;
-        let oldest: Option<String> = sqlx::query_scalar("SELECT MIN(timestamp) FROM events")
-            .fetch_one(pool)
-            .await?;
-        let newest: Option<String> = sqlx::query_scalar("SELECT MAX(timestamp) FROM events")
-            .fetch_one(pool)
-            .await?;
-        (count, oldest, newest)
+        format!(" WHERE {}", conditions.join(" AND "))
     };
 
-    let session_count: i64 = if let Some(since) = since {
-        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE last_seen >= ?")
-            .bind(since)
-            .fetch_one(pool)
-            .await?
+    // Event count
+    let count_sql = format!("SELECT COUNT(*) FROM events{where_clause}");
+    let mut query = sqlx::query_scalar::<_, i64>(&count_sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+    let event_count = query.fetch_one(pool).await?;
+
+    // Oldest event
+    let oldest_sql = format!("SELECT MIN(timestamp) FROM events{where_clause}");
+    let mut query = sqlx::query_scalar::<_, Option<String>>(&oldest_sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+    let oldest_event = query.fetch_one(pool).await?;
+
+    // Newest event
+    let newest_sql = format!("SELECT MAX(timestamp) FROM events{where_clause}");
+    let mut query = sqlx::query_scalar::<_, Option<String>>(&newest_sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+    let newest_event = query.fetch_one(pool).await?;
+
+    // Session count - uses last_seen for since, account_id for account
+    let mut session_conditions: Vec<&str> = Vec::new();
+    let mut session_binds: Vec<String> = Vec::new();
+
+    if let Some(since) = since {
+        session_conditions.push("last_seen >= ?");
+        session_binds.push(since.to_string());
+    }
+    if let Some(account) = account {
+        session_conditions.push("account_id = ?");
+        session_binds.push(account.to_string());
+    }
+
+    let session_where = if session_conditions.is_empty() {
+        String::new()
     } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-            .fetch_one(pool)
-            .await?
+        format!(" WHERE {}", session_conditions.join(" AND "))
     };
+
+    let session_sql = format!("SELECT COUNT(*) FROM sessions{session_where}");
+    let mut query = sqlx::query_scalar::<_, i64>(&session_sql);
+    for bind in &session_binds {
+        query = query.bind(bind);
+    }
+    let session_count = query.fetch_one(pool).await?;
 
     Ok(DbStats {
         event_count,
@@ -645,6 +760,7 @@ pub async fn top_tools(
     pool: &SqlitePool,
     since: Option<&str>,
     limit: i64,
+    account: Option<&str>,
 ) -> Result<Vec<ToolCount>, Box<dyn std::error::Error>> {
     let mut sql =
         String::from("SELECT tool_name, COUNT(*) as count FROM events WHERE tool_name IS NOT NULL");
@@ -653,6 +769,11 @@ pub async fn top_tools(
     if let Some(since) = since {
         sql.push_str(" AND timestamp >= ?");
         binds.push(since.to_string());
+    }
+
+    if let Some(account) = account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.to_string());
     }
 
     sql.push_str(" GROUP BY tool_name ORDER BY count DESC LIMIT ?");
@@ -685,13 +806,19 @@ pub struct EventTypeCount {
 pub async fn event_type_breakdown(
     pool: &SqlitePool,
     since: Option<&str>,
+    account: Option<&str>,
 ) -> Result<Vec<EventTypeCount>, Box<dyn std::error::Error>> {
-    let mut sql = String::from("SELECT event_type, COUNT(*) as count FROM events");
+    let mut sql = String::from("SELECT event_type, COUNT(*) as count FROM events WHERE 1=1");
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(since) = since {
-        sql.push_str(" WHERE timestamp >= ?");
+        sql.push_str(" AND timestamp >= ?");
         binds.push(since.to_string());
+    }
+
+    if let Some(account) = account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.to_string());
     }
 
     sql.push_str(" GROUP BY event_type ORDER BY count DESC");
@@ -731,34 +858,42 @@ pub struct ErrorSummary {
 pub async fn error_summary(
     pool: &SqlitePool,
     since: Option<&str>,
+    account: Option<&str>,
 ) -> Result<ErrorSummary, Box<dyn std::error::Error>> {
     // Count PostToolUseFailure events
-    let post_tool_use_failure_count: i64 = if let Some(since) = since {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM events WHERE event_type = 'PostToolUseFailure' AND timestamp >= ?",
-        )
-        .bind(since)
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = 'PostToolUseFailure'")
-            .fetch_one(pool)
-            .await?
-    };
+    let mut ptuf_sql =
+        String::from("SELECT COUNT(*) FROM events WHERE event_type = 'PostToolUseFailure'");
+    let mut ptuf_binds: Vec<String> = Vec::new();
+    if let Some(since) = since {
+        ptuf_sql.push_str(" AND timestamp >= ?");
+        ptuf_binds.push(since.to_string());
+    }
+    if let Some(account) = account {
+        ptuf_sql.push_str(" AND account_id = ?");
+        ptuf_binds.push(account.to_string());
+    }
+    let mut ptuf_query = sqlx::query_scalar::<_, i64>(&ptuf_sql);
+    for bind in &ptuf_binds {
+        ptuf_query = ptuf_query.bind(bind);
+    }
+    let post_tool_use_failure_count: i64 = ptuf_query.fetch_one(pool).await?;
 
     // Count StopFailure events
-    let stop_failure_count: i64 = if let Some(since) = since {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM events WHERE event_type = 'StopFailure' AND timestamp >= ?",
-        )
-        .bind(since)
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = 'StopFailure'")
-            .fetch_one(pool)
-            .await?
-    };
+    let mut sf_sql = String::from("SELECT COUNT(*) FROM events WHERE event_type = 'StopFailure'");
+    let mut sf_binds: Vec<String> = Vec::new();
+    if let Some(since) = since {
+        sf_sql.push_str(" AND timestamp >= ?");
+        sf_binds.push(since.to_string());
+    }
+    if let Some(account) = account {
+        sf_sql.push_str(" AND account_id = ?");
+        sf_binds.push(account.to_string());
+    }
+    let mut sf_query = sqlx::query_scalar::<_, i64>(&sf_sql);
+    for bind in &sf_binds {
+        sf_query = sf_query.bind(bind);
+    }
+    let stop_failure_count: i64 = sf_query.fetch_one(pool).await?;
 
     // StopFailure type breakdown via JOIN on stop_event_details (with fallback)
     let stop_failure_types = if stop_failure_count > 0 {
@@ -774,6 +909,11 @@ pub async fn error_summary(
         if let Some(since) = since {
             sql.push_str(" AND e.timestamp >= ?");
             binds.push(since.to_string());
+        }
+
+        if let Some(account) = account {
+            sql.push_str(" AND e.account_id = ?");
+            binds.push(account.to_string());
         }
 
         sql.push_str(" GROUP BY sed.error ORDER BY count DESC");
@@ -803,6 +943,11 @@ pub async fn error_summary(
             if let Some(since) = since {
                 fallback_sql.push_str(" AND timestamp >= ?");
                 fallback_binds.push(since.to_string());
+            }
+
+            if let Some(account) = account {
+                fallback_sql.push_str(" AND account_id = ?");
+                fallback_binds.push(account.to_string());
             }
 
             let mut fallback_query = sqlx::query_scalar::<_, String>(&fallback_sql);
@@ -856,6 +1001,7 @@ pub async fn top_directories(
     pool: &SqlitePool,
     since: Option<&str>,
     limit: i64,
+    account: Option<&str>,
 ) -> Result<Vec<DirCount>, Box<dyn std::error::Error>> {
     let mut sql = String::from("SELECT cwd, COUNT(*) as count FROM events WHERE cwd IS NOT NULL");
     let mut binds: Vec<String> = Vec::new();
@@ -863,6 +1009,11 @@ pub async fn top_directories(
     if let Some(since) = since {
         sql.push_str(" AND timestamp >= ?");
         binds.push(since.to_string());
+    }
+
+    if let Some(account) = account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.to_string());
     }
 
     sql.push_str(" GROUP BY cwd ORDER BY count DESC LIMIT ?");
@@ -891,6 +1042,7 @@ pub async fn avg_session_duration(
     pool: &SqlitePool,
     since: Option<&str>,
     max_duration_seconds: Option<f64>,
+    account: Option<&str>,
 ) -> Result<Option<f64>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
         "SELECT AVG((julianday(last_seen) - julianday(first_seen)) * 86400) as avg_seconds FROM sessions WHERE first_seen != last_seen",
@@ -904,12 +1056,19 @@ pub async fn avg_session_duration(
         sql.push_str(" AND (julianday(last_seen) - julianday(first_seen)) * 86400 <= ?");
     }
 
+    if account.is_some() {
+        sql.push_str(" AND account_id = ?");
+    }
+
     let mut query = sqlx::query(&sql);
     if let Some(since) = since {
         query = query.bind(since);
     }
     if let Some(max_secs) = max_duration_seconds {
         query = query.bind(max_secs);
+    }
+    if let Some(account) = account {
+        query = query.bind(account);
     }
 
     let row = query.fetch_one(pool).await?;
@@ -928,6 +1087,7 @@ pub struct DailyCount {
 pub async fn daily_activity(
     pool: &SqlitePool,
     since: Option<&str>,
+    account: Option<&str>,
 ) -> Result<Vec<DailyCount>, Box<dyn std::error::Error>> {
     let default_since;
     let since_val = if let Some(s) = since {
@@ -939,13 +1099,24 @@ pub async fn daily_activity(
         &default_since
     };
 
-    let rows = sqlx::query(
-        "SELECT DATE(timestamp) as day, COUNT(*) as count FROM events WHERE timestamp >= ? GROUP BY day ORDER BY day ASC",
-    )
-    .bind(since_val)
-    .fetch_all(pool)
-    .await?;
+    let mut sql = String::from(
+        "SELECT DATE(timestamp) as day, COUNT(*) as count FROM events WHERE timestamp >= ?",
+    );
+    let mut binds: Vec<String> = vec![since_val.to_string()];
 
+    if let Some(account) = account {
+        sql.push_str(" AND account_id = ?");
+        binds.push(account.to_string());
+    }
+
+    sql.push_str(" GROUP BY day ORDER BY day ASC");
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(pool).await?;
     let results = rows
         .iter()
         .map(|row| DailyCount {
@@ -1434,6 +1605,7 @@ pub struct ToolFailureCount {
 pub async fn sessions_by_model(
     pool: &SqlitePool,
     since: Option<&str>,
+    account: Option<&str>,
 ) -> Result<Vec<ModelSessionCount>, Box<dyn std::error::Error>> {
     let mut sql = String::from(
         "SELECT sed.model, COUNT(DISTINCT e.session_id) as session_count \
@@ -1446,6 +1618,11 @@ pub async fn sessions_by_model(
     if let Some(since) = since {
         sql.push_str(" AND e.timestamp >= ?");
         binds.push(since.to_string());
+    }
+
+    if let Some(account) = account {
+        sql.push_str(" AND e.account_id = ?");
+        binds.push(account.to_string());
     }
 
     sql.push_str(" GROUP BY sed.model ORDER BY session_count DESC");
@@ -1838,50 +2015,72 @@ pub struct ToolTokenUsage {
 pub async fn token_usage_summary(
     pool: &SqlitePool,
     since: &str,
+    account: Option<&str>,
 ) -> Result<TokenUsageSummary, Box<dyn std::error::Error>> {
+    let acct_filter = if account.is_some() {
+        " AND account_id = ?"
+    } else {
+        ""
+    };
+    let acct_filter_e = if account.is_some() {
+        " AND e.account_id = ?"
+    } else {
+        ""
+    };
+
     // Event/session counts
-    let counts: (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM events WHERE timestamp >= ?",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
+    let counts_sql = format!(
+        "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM events WHERE timestamp >= ?{acct_filter}"
+    );
+    let mut query = sqlx::query_as::<_, (i64, i64)>(&counts_sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let counts = query.fetch_one(pool).await?;
 
     // Input chars: tool_response (PostToolUse) + prompt (UserPromptSubmit)
-    let response_chars: (i64,) = sqlx::query_as(
+    let response_sql = format!(
         "SELECT COALESCE(SUM(LENGTH(tool_response)), 0) FROM events \
-         WHERE event_type = 'PostToolUse' AND tool_response IS NOT NULL AND timestamp >= ?",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
+         WHERE event_type = 'PostToolUse' AND tool_response IS NOT NULL AND timestamp >= ?{acct_filter}"
+    );
+    let mut query = sqlx::query_as::<_, (i64,)>(&response_sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let response_chars = query.fetch_one(pool).await?;
 
-    let prompt_chars: (i64,) = sqlx::query_as(
+    let prompt_sql = format!(
         "SELECT COALESCE(SUM(LENGTH(ped.prompt)), 0) \
          FROM events e JOIN prompt_event_details ped ON ped.event_id = e.id \
-         WHERE e.event_type = 'UserPromptSubmit' AND e.timestamp >= ?",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
+         WHERE e.event_type = 'UserPromptSubmit' AND e.timestamp >= ?{acct_filter_e}"
+    );
+    let mut query = sqlx::query_as::<_, (i64,)>(&prompt_sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let prompt_chars = query.fetch_one(pool).await?;
 
     // Output chars: tool_input (all tool events) + last_assistant_message (Stop/SubagentStop)
-    let tool_input_chars: (i64,) = sqlx::query_as(
+    let tool_input_sql = format!(
         "SELECT COALESCE(SUM(LENGTH(tool_input)), 0) FROM events \
-         WHERE tool_input IS NOT NULL AND timestamp >= ?",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
+         WHERE tool_input IS NOT NULL AND timestamp >= ?{acct_filter}"
+    );
+    let mut query = sqlx::query_as::<_, (i64,)>(&tool_input_sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let tool_input_chars = query.fetch_one(pool).await?;
 
-    let assistant_chars: (i64,) = sqlx::query_as(
+    let assistant_sql = format!(
         "SELECT COALESCE(SUM(LENGTH(sed.last_assistant_message)), 0) \
          FROM events e JOIN stop_event_details sed ON sed.event_id = e.id \
-         WHERE e.event_type IN ('Stop', 'SubagentStop') AND e.timestamp >= ?",
-    )
-    .bind(since)
-    .fetch_one(pool)
-    .await?;
+         WHERE e.event_type IN ('Stop', 'SubagentStop') AND e.timestamp >= ?{acct_filter_e}"
+    );
+    let mut query = sqlx::query_as::<_, (i64,)>(&assistant_sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let assistant_chars = query.fetch_one(pool).await?;
 
     Ok(TokenUsageSummary {
         session_count: counts.1,
@@ -1896,20 +2095,28 @@ pub async fn token_usage_summary(
 pub async fn token_usage_by_model(
     pool: &SqlitePool,
     since: &str,
+    account: Option<&str>,
 ) -> Result<Vec<ModelTokenUsage>, Box<dyn std::error::Error>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
+    let acct_filter = if account.is_some() {
+        " AND e.account_id = ?"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT sed.model, \
              COALESCE(SUM(LENGTH(e.tool_input)), 0) + COALESCE(SUM(LENGTH(e.tool_response)), 0) as total_chars \
          FROM events e \
          JOIN events e_start ON e_start.session_id = e.session_id AND e_start.event_type = 'SessionStart' \
          JOIN session_event_details sed ON sed.event_id = e_start.id \
-         WHERE e.timestamp >= ? AND sed.model IS NOT NULL \
+         WHERE e.timestamp >= ? AND sed.model IS NOT NULL{acct_filter} \
          GROUP BY sed.model \
-         ORDER BY total_chars DESC",
-    )
-    .bind(since)
-    .fetch_all(pool)
-    .await?;
+         ORDER BY total_chars DESC"
+    );
+    let mut query = sqlx::query_as::<_, (String, i64)>(&sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let rows = query.fetch_all(pool).await?;
 
     Ok(rows
         .into_iter()
@@ -1923,19 +2130,27 @@ pub async fn token_usage_by_tool(
     pool: &SqlitePool,
     since: &str,
     limit: u32,
+    account: Option<&str>,
 ) -> Result<Vec<ToolTokenUsage>, Box<dyn std::error::Error>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
+    let acct_filter = if account.is_some() {
+        " AND account_id = ?"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT tool_name, \
              COALESCE(SUM(LENGTH(tool_input)), 0) + COALESCE(SUM(LENGTH(tool_response)), 0) as total_chars \
          FROM events \
-         WHERE tool_name IS NOT NULL AND timestamp >= ? \
+         WHERE tool_name IS NOT NULL AND timestamp >= ?{acct_filter} \
          GROUP BY tool_name \
-         ORDER BY total_chars DESC LIMIT ?",
-    )
-    .bind(since)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+         ORDER BY total_chars DESC LIMIT ?"
+    );
+    let mut query = sqlx::query_as::<_, (String, i64)>(&sql).bind(since);
+    if let Some(account) = account {
+        query = query.bind(account);
+    }
+    let query = query.bind(limit);
+    let rows = query.fetch_all(pool).await?;
 
     Ok(rows
         .into_iter()
@@ -2642,7 +2857,9 @@ mod tests {
             tool_use_id: Some("tu-123".to_string()),
             ..Default::default()
         };
-        let event_id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let event_id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         // Verify detail row exists
         let detail_count: i64 =
@@ -2693,7 +2910,9 @@ mod tests {
             model: Some("claude-sonnet".to_string()),
             ..Default::default()
         };
-        let event_id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let event_id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         // Verify session_event_details row exists
         let count: i64 =
@@ -3403,7 +3622,7 @@ mod tests {
     #[tokio::test]
     async fn test_top_tools_populated() {
         let (pool, _dir) = setup_stats_db().await;
-        let tools = top_tools(&pool, None, 10).await.unwrap();
+        let tools = top_tools(&pool, None, 10, None).await.unwrap();
         assert!(!tools.is_empty());
         // Bash has 3 events, Read has 1, Write has 1 (PreToolUse only; PostToolUseFailure also has tool_name)
         assert_eq!(tools[0].tool_name, "Bash");
@@ -3414,7 +3633,7 @@ mod tests {
     async fn test_top_tools_with_since() {
         let (pool, _dir) = setup_stats_db().await;
         // Only events from 2025-01-12 onwards
-        let tools = top_tools(&pool, Some("2025-01-12T00:00:00.000Z"), 10)
+        let tools = top_tools(&pool, Some("2025-01-12T00:00:00.000Z"), 10, None)
             .await
             .unwrap();
         // Write has 2 events (PreToolUse + PostToolUseFailure both have tool_name=Write)
@@ -3429,14 +3648,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
-        let tools = top_tools(&pool, None, 10).await.unwrap();
+        let tools = top_tools(&pool, None, 10, None).await.unwrap();
         assert!(tools.is_empty());
     }
 
     #[tokio::test]
     async fn test_top_tools_limit() {
         let (pool, _dir) = setup_stats_db().await;
-        let tools = top_tools(&pool, None, 1).await.unwrap();
+        let tools = top_tools(&pool, None, 1, None).await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_name, "Bash");
     }
@@ -3444,7 +3663,7 @@ mod tests {
     #[tokio::test]
     async fn test_event_type_breakdown_populated() {
         let (pool, _dir) = setup_stats_db().await;
-        let types = event_type_breakdown(&pool, None).await.unwrap();
+        let types = event_type_breakdown(&pool, None, None).await.unwrap();
         assert!(!types.is_empty());
         // PreToolUse should be the most common (4 events)
         assert_eq!(types[0].event_type, "PreToolUse");
@@ -3454,7 +3673,7 @@ mod tests {
     #[tokio::test]
     async fn test_event_type_breakdown_with_since() {
         let (pool, _dir) = setup_stats_db().await;
-        let types = event_type_breakdown(&pool, Some("2025-01-12T00:00:00.000Z"))
+        let types = event_type_breakdown(&pool, Some("2025-01-12T00:00:00.000Z"), None)
             .await
             .unwrap();
         // Should only include events from s2 (6 events)
@@ -3467,14 +3686,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
-        let types = event_type_breakdown(&pool, None).await.unwrap();
+        let types = event_type_breakdown(&pool, None, None).await.unwrap();
         assert!(types.is_empty());
     }
 
     #[tokio::test]
     async fn test_error_summary_with_errors() {
         let (pool, _dir) = setup_stats_db().await;
-        let errors = error_summary(&pool, None).await.unwrap();
+        let errors = error_summary(&pool, None, None).await.unwrap();
         assert_eq!(errors.post_tool_use_failure_count, 1);
         assert_eq!(errors.stop_failure_count, 3);
         assert_eq!(errors.stop_failure_types.len(), 2);
@@ -3499,7 +3718,7 @@ mod tests {
         .await
         .unwrap();
 
-        let errors = error_summary(&pool, None).await.unwrap();
+        let errors = error_summary(&pool, None, None).await.unwrap();
         assert_eq!(errors.post_tool_use_failure_count, 0);
         assert_eq!(errors.stop_failure_count, 0);
         assert!(errors.stop_failure_types.is_empty());
@@ -3509,7 +3728,7 @@ mod tests {
     async fn test_error_summary_with_since() {
         let (pool, _dir) = setup_stats_db().await;
         // Before any StopFailure events
-        let errors = error_summary(&pool, Some("2025-01-13T00:00:00.000Z"))
+        let errors = error_summary(&pool, Some("2025-01-13T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert_eq!(errors.post_tool_use_failure_count, 0);
@@ -3519,7 +3738,7 @@ mod tests {
     #[tokio::test]
     async fn test_top_directories_populated() {
         let (pool, _dir) = setup_stats_db().await;
-        let dirs = top_directories(&pool, None, 5).await.unwrap();
+        let dirs = top_directories(&pool, None, 5, None).await.unwrap();
         assert_eq!(dirs.len(), 2);
         // project-b has 6 events, project-a has 5
         assert_eq!(dirs[0].cwd, "/home/user/project-b");
@@ -3531,7 +3750,7 @@ mod tests {
     #[tokio::test]
     async fn test_top_directories_with_since() {
         let (pool, _dir) = setup_stats_db().await;
-        let dirs = top_directories(&pool, Some("2025-01-12T00:00:00.000Z"), 5)
+        let dirs = top_directories(&pool, Some("2025-01-12T00:00:00.000Z"), 5, None)
             .await
             .unwrap();
         assert_eq!(dirs.len(), 1);
@@ -3543,14 +3762,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
-        let dirs = top_directories(&pool, None, 5).await.unwrap();
+        let dirs = top_directories(&pool, None, 5, None).await.unwrap();
         assert!(dirs.is_empty());
     }
 
     #[tokio::test]
     async fn test_avg_session_duration_normal() {
         let (pool, _dir) = setup_stats_db().await;
-        let avg = avg_session_duration(&pool, None, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None, None).await.unwrap();
         assert!(avg.is_some());
         let avg = avg.unwrap();
         // s1: 2025-01-10T10:00 to 2025-01-11T09:00 = 23 hours = 82800s
@@ -3573,7 +3792,7 @@ mod tests {
         .await
         .unwrap();
 
-        let avg = avg_session_duration(&pool, None, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None, None).await.unwrap();
         assert!(avg.is_none());
     }
 
@@ -3583,7 +3802,7 @@ mod tests {
         let db_path = dir.path().join("no_sessions.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
 
-        let avg = avg_session_duration(&pool, None, None).await.unwrap();
+        let avg = avg_session_duration(&pool, None, None, None).await.unwrap();
         assert!(avg.is_none());
     }
 
@@ -3591,7 +3810,7 @@ mod tests {
     async fn test_avg_session_duration_with_since() {
         let (pool, _dir) = setup_stats_db().await;
         // Only s2 has last_seen >= 2025-01-12
-        let avg = avg_session_duration(&pool, Some("2025-01-12T00:00:00.000Z"), None)
+        let avg = avg_session_duration(&pool, Some("2025-01-12T00:00:00.000Z"), None, None)
             .await
             .unwrap();
         assert!(avg.is_some());
@@ -3604,7 +3823,7 @@ mod tests {
         let (pool, _dir) = setup_stats_db().await;
         // s1: 23 hours = 82800s, s2: 1 hour = 3600s
         // Cap at 8 hours (28800s) — only s2 qualifies
-        let avg = avg_session_duration(&pool, None, Some(28800.0))
+        let avg = avg_session_duration(&pool, None, Some(28800.0), None)
             .await
             .unwrap();
         assert!(avg.is_some());
@@ -3615,7 +3834,7 @@ mod tests {
     async fn test_avg_session_duration_cap_excludes_all() {
         let (pool, _dir) = setup_stats_db().await;
         // Cap at 30 minutes — neither session qualifies
-        let avg = avg_session_duration(&pool, None, Some(1800.0))
+        let avg = avg_session_duration(&pool, None, Some(1800.0), None)
             .await
             .unwrap();
         assert!(avg.is_none());
@@ -3624,7 +3843,7 @@ mod tests {
     #[tokio::test]
     async fn test_daily_activity_populated() {
         let (pool, _dir) = setup_stats_db().await;
-        let activity = daily_activity(&pool, Some("2025-01-10T00:00:00.000Z"))
+        let activity = daily_activity(&pool, Some("2025-01-10T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert!(!activity.is_empty());
@@ -3640,7 +3859,7 @@ mod tests {
     #[tokio::test]
     async fn test_daily_activity_with_since() {
         let (pool, _dir) = setup_stats_db().await;
-        let activity = daily_activity(&pool, Some("2025-01-12T00:00:00.000Z"))
+        let activity = daily_activity(&pool, Some("2025-01-12T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert_eq!(activity.len(), 1);
@@ -3653,7 +3872,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("empty.db");
         let pool = connect(db_path.to_str().unwrap()).await.unwrap();
-        let activity = daily_activity(&pool, Some("2025-01-01T00:00:00.000Z"))
+        let activity = daily_activity(&pool, Some("2025-01-01T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert!(activity.is_empty());
@@ -3662,7 +3881,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_stats_with_since() {
         let (pool, _dir) = setup_stats_db().await;
-        let stats = get_stats(&pool, Some("2025-01-12T00:00:00.000Z"))
+        let stats = get_stats(&pool, Some("2025-01-12T00:00:00.000Z"), None)
             .await
             .unwrap();
         assert_eq!(stats.event_count, 6); // only s2 events
@@ -3674,7 +3893,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_stats_without_since() {
         let (pool, _dir) = setup_stats_db().await;
-        let stats = get_stats(&pool, None).await.unwrap();
+        let stats = get_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.event_count, 11);
         assert_eq!(stats.session_count, 2);
     }
@@ -3699,7 +3918,9 @@ mod tests {
             tool_use_id: Some("tu-123".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query("SELECT tool_use_id FROM tool_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3725,7 +3946,9 @@ mod tests {
             is_interrupt: Some(true),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT error, error_details, is_interrupt FROM tool_event_details WHERE event_id = ?",
@@ -3756,7 +3979,9 @@ mod tests {
             permission_suggestions: Some(serde_json::json!({"allow": true})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row =
             sqlx::query("SELECT permission_suggestions FROM tool_event_details WHERE event_id = ?")
@@ -3781,7 +4006,9 @@ mod tests {
             error_details: Some("too many requests".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row =
             sqlx::query("SELECT error, error_details FROM stop_event_details WHERE event_id = ?")
@@ -3810,7 +4037,9 @@ mod tests {
             last_assistant_message: Some("done".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT stop_hook_active, last_assistant_message FROM stop_event_details WHERE event_id = ?",
@@ -3837,7 +4066,9 @@ mod tests {
             stop_hook_active: Some(true),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query("SELECT stop_hook_active FROM stop_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3858,7 +4089,9 @@ mod tests {
             model: Some("claude-sonnet-4-5-20250514".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query("SELECT source, model FROM session_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3885,7 +4118,9 @@ mod tests {
             reason: Some("clear".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query("SELECT reason FROM session_event_details WHERE event_id = ?")
             .bind(eid)
@@ -3910,7 +4145,9 @@ mod tests {
             file_path: Some("/home/.claude/settings.json".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT source, model, file_path FROM session_event_details WHERE event_id = ?",
@@ -3942,7 +4179,9 @@ mod tests {
             cwd: "/tmp".into(),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         // No row in any Tier 1 detail table
         let tool_count: i64 =
@@ -3980,7 +4219,9 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "ls"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, r#"{"raw":true}"#, "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, r#"{"raw":true}"#, "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT e.event_type, e.tool_name, d.tool_use_id
@@ -4012,8 +4253,12 @@ mod tests {
             cwd: "/tmp".into(),
             ..Default::default()
         };
-        let id1 = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
-        let id2 = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id1 = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
+        let id2 = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
         assert!(id1 > 0);
         assert!(id2 > id1);
     }
@@ -4031,7 +4276,9 @@ mod tests {
             agent_type: Some("Explore".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT agent_id, agent_type, agent_transcript_path FROM agent_event_details WHERE event_id = ?",
@@ -4067,7 +4314,9 @@ mod tests {
             last_assistant_message: Some("done".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         // Verify stop_event_details
         let stop_row =
@@ -4123,7 +4372,9 @@ mod tests {
             message: Some("Please confirm".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT notification_type, title, message FROM notification_event_details WHERE event_id = ?",
@@ -4160,7 +4411,9 @@ mod tests {
             requested_schema: Some(serde_json::json!({"type": "object"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT elicitation_id, mcp_server_name, mode, url, requested_schema FROM notification_event_details WHERE event_id = ?",
@@ -4203,7 +4456,9 @@ mod tests {
             content: Some(serde_json::json!({"field": "value"})),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT action, content FROM notification_event_details WHERE event_id = ?",
@@ -4233,7 +4488,9 @@ mod tests {
             custom_instructions: Some("keep it short".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT `trigger`, custom_instructions, compact_summary FROM compact_event_details WHERE event_id = ?",
@@ -4265,7 +4522,9 @@ mod tests {
             compact_summary: Some("summarized".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT `trigger`, compact_summary FROM compact_event_details WHERE event_id = ?",
@@ -4299,7 +4558,9 @@ mod tests {
             parent_file_path: Some("/parent".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path FROM instruction_event_details WHERE event_id = ?",
@@ -4344,7 +4605,9 @@ mod tests {
             team_name: Some("alpha".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT teammate_name, team_name FROM team_event_details WHERE event_id = ?",
@@ -4377,7 +4640,9 @@ mod tests {
             task_description: Some("fixed the null pointer".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query(
             "SELECT task_id, task_subject, task_description FROM team_event_details WHERE event_id = ?",
@@ -4410,7 +4675,9 @@ mod tests {
             prompt: Some("hello world".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row = sqlx::query("SELECT prompt FROM prompt_event_details WHERE event_id = ?")
             .bind(eid)
@@ -4433,7 +4700,9 @@ mod tests {
             worktree_path: Some("/worktree/feature-x".into()),
             ..Default::default()
         };
-        let eid = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let eid = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let row =
             sqlx::query("SELECT worktree_path FROM worktree_event_details WHERE event_id = ?")
@@ -4460,7 +4729,9 @@ mod tests {
                 model: Some("claude-sonnet-4-20250514".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+            insert_event(&pool, &hook, "{}", "default", None)
+                .await
+                .unwrap();
         }
         let hook = crate::models::HookInput {
             session_id: "opus-session-1".into(),
@@ -4469,9 +4740,11 @@ mod tests {
             model: Some("claude-opus-4-20250514".into()),
             ..Default::default()
         };
-        insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
-        let results = sessions_by_model(&pool, None).await.unwrap();
+        let results = sessions_by_model(&pool, None, None).await.unwrap();
         assert_eq!(results.len(), 2);
         // Sorted by count DESC
         assert_eq!(results[0].model, "claude-sonnet-4-20250514");
@@ -4483,7 +4756,7 @@ mod tests {
     #[tokio::test]
     async fn test_sessions_by_model_empty() {
         let (pool, _dir) = setup_detail_db().await;
-        let results = sessions_by_model(&pool, None).await.unwrap();
+        let results = sessions_by_model(&pool, None, None).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -4501,7 +4774,9 @@ mod tests {
                 error: Some("timeout".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+            insert_event(&pool, &hook, "{}", "default", None)
+                .await
+                .unwrap();
         }
         let hook = crate::models::HookInput {
             session_id: "s3".into(),
@@ -4511,7 +4786,9 @@ mod tests {
             error: Some("not_found".into()),
             ..Default::default()
         };
-        insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let results = tool_failures_by_error(&pool, None).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -4538,9 +4815,15 @@ mod tests {
                 error: Some("context_limit".into()),
                 ..Default::default()
             };
-            insert_event(&pool, &hook, r#"{"error":"context_limit"}"#, "default", None)
-                .await
-                .unwrap();
+            insert_event(
+                &pool,
+                &hook,
+                r#"{"error":"context_limit"}"#,
+                "default",
+                None,
+            )
+            .await
+            .unwrap();
         }
         let hook = crate::models::HookInput {
             session_id: "s2".into(),
@@ -4553,7 +4836,7 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = error_summary(&pool, None).await.unwrap();
+        let summary = error_summary(&pool, None, None).await.unwrap();
         assert_eq!(summary.stop_failure_count, 3);
         assert_eq!(summary.stop_failure_types.len(), 2);
         // Sorted by count DESC
@@ -4593,7 +4876,7 @@ mod tests {
         .await
         .unwrap();
 
-        let summary = error_summary(&pool, None).await.unwrap();
+        let summary = error_summary(&pool, None, None).await.unwrap();
         assert_eq!(summary.stop_failure_count, 2);
         assert_eq!(summary.stop_failure_types.len(), 1);
         assert_eq!(summary.stop_failure_types[0].error_type, "context_limit");
@@ -4613,7 +4896,9 @@ mod tests {
             tool_use_id: Some("tu-001".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let detail = fetch_event_detail(&pool, id, "PreToolUse").await.unwrap();
         assert!(detail.is_some());
@@ -4638,7 +4923,9 @@ mod tests {
             stop_hook_active: Some(true),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let detail = fetch_event_detail(&pool, id, "StopFailure").await.unwrap();
         assert!(detail.is_some());
@@ -4666,7 +4953,9 @@ mod tests {
             agent_transcript_path: Some("/tmp/transcript.json".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let detail = fetch_event_detail(&pool, id, "SubagentStop").await.unwrap();
         assert!(detail.is_some());
@@ -4706,7 +4995,9 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".into()),
             ..Default::default()
         };
-        let id = insert_event(&pool, &hook, "{}", "default", None).await.unwrap();
+        let id = insert_event(&pool, &hook, "{}", "default", None)
+            .await
+            .unwrap();
 
         let detail = fetch_event_detail(&pool, id, "SessionStart").await.unwrap();
         assert!(detail.is_some());

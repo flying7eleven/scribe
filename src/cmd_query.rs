@@ -117,6 +117,8 @@ fn print_events_json(events: &[EventRow]) {
             "permission_mode": event.permission_mode,
             "raw_payload": event.raw_payload,
             "origin_machine_id": event.origin_machine_id,
+            "account_id": event.account_id,
+            "account_email": event.account_email,
         });
         println!("{}", serde_json::to_string(&obj).unwrap());
     }
@@ -135,6 +137,8 @@ fn print_events_csv(events: &[EventRow]) -> Result<(), Box<dyn std::error::Error
         "cwd",
         "permission_mode",
         "raw_payload",
+        "account_id",
+        "account_email",
     ])?;
     for event in events {
         wtr.write_record([
@@ -148,6 +152,8 @@ fn print_events_csv(events: &[EventRow]) -> Result<(), Box<dyn std::error::Error
             event.cwd.as_deref().unwrap_or(""),
             event.permission_mode.as_deref().unwrap_or(""),
             &event.raw_payload,
+            &event.account_id,
+            event.account_email.as_deref().unwrap_or(""),
         ])?;
     }
     wtr.flush()?;
@@ -161,6 +167,7 @@ fn print_sessions_table(sessions: &[SessionRow]) {
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec![
         "SESSION",
+        "ACCOUNT",
         "FIRST SEEN",
         "LAST SEEN",
         "DURATION",
@@ -169,8 +176,13 @@ fn print_sessions_table(sessions: &[SessionRow]) {
     ]);
 
     for session in sessions {
+        let account_label = session
+            .account_email
+            .as_deref()
+            .unwrap_or(&session.account_id);
         table.add_row(vec![
             truncate_session_id(&session.session_id),
+            truncate_str(account_label, 30),
             format_timestamp(&session.first_seen),
             format_timestamp(&session.last_seen),
             format_duration(&session.first_seen, &session.last_seen),
@@ -186,6 +198,8 @@ fn print_sessions_json(sessions: &[SessionRow]) {
     for session in sessions {
         let obj = json!({
             "session_id": session.session_id,
+            "account_id": session.account_id,
+            "account_email": session.account_email,
             "first_seen": session.first_seen,
             "last_seen": session.last_seen,
             "duration": format_duration(&session.first_seen, &session.last_seen),
@@ -200,6 +214,8 @@ fn print_sessions_csv(sessions: &[SessionRow]) -> Result<(), Box<dyn std::error:
     let mut wtr = csv::Writer::from_writer(io::stdout());
     wtr.write_record([
         "session_id",
+        "account_id",
+        "account_email",
         "first_seen",
         "last_seen",
         "duration",
@@ -209,6 +225,8 @@ fn print_sessions_csv(sessions: &[SessionRow]) -> Result<(), Box<dyn std::error:
     for session in sessions {
         wtr.write_record([
             &session.session_id,
+            &session.account_id,
+            session.account_email.as_deref().unwrap_or(""),
             &session.first_seen,
             &session.last_seen,
             &format_duration(&session.first_seen, &session.last_seen),

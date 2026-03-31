@@ -45,6 +45,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Read hook JSON from stdin and write to SQLite
     Log,
@@ -71,6 +72,9 @@ enum Commands {
         /// Search in tool_input JSON
         #[arg(long)]
         search: Option<String>,
+        /// Filter by account (orgId or email)
+        #[arg(long)]
+        account: Option<String>,
         /// Maximum number of results
         #[arg(long)]
         limit: Option<i64>,
@@ -104,6 +108,9 @@ enum Commands {
         /// Show stats since a duration (e.g. 7d) or date (e.g. 2025-06-01)
         #[arg(long)]
         since: Option<String>,
+        /// Filter by account (orgId or email)
+        #[arg(long)]
+        account: Option<String>,
         /// Output stats as a single JSON object
         #[arg(long)]
         json: bool,
@@ -117,6 +124,9 @@ enum Commands {
         /// Time window for weekly estimate (e.g. 7d, 14d)
         #[arg(long, default_value = "7d")]
         weekly: String,
+        /// Filter by account (orgId or email)
+        #[arg(long)]
+        account: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -184,6 +194,9 @@ enum QuerySub {
         /// Show sessions since (duration or date)
         #[arg(long)]
         since: Option<String>,
+        /// Filter by account (orgId or email)
+        #[arg(long)]
+        account: Option<String>,
         /// Maximum number of results
         #[arg(long)]
         limit: Option<i64>,
@@ -305,12 +318,14 @@ async fn main() {
             event,
             tool,
             search,
+            account,
             limit,
             json,
             csv,
         } => {
             if let Some(QuerySub::Sessions {
                 since: s_since,
+                account: s_account,
                 limit: s_limit,
                 json: s_json,
                 csv: s_csv,
@@ -323,8 +338,13 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+                let resolved_account = match s_account {
+                    Some(a) => Some(db::resolve_account_filter(&pool, &a).await.unwrap_or(a)),
+                    None => None,
+                };
                 let filter = db::SessionFilter {
                     since: s_since,
+                    account: resolved_account,
                     limit: s_limit.or(config.default_query_limit).unwrap_or(50),
                 };
                 let format = if s_json {
@@ -354,6 +374,10 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+                let resolved_account = match account {
+                    Some(a) => Some(db::resolve_account_filter(&pool, &a).await.unwrap_or(a)),
+                    None => None,
+                };
                 let filter = db::EventFilter {
                     since,
                     until,
@@ -361,6 +385,7 @@ async fn main() {
                     event_type: event,
                     tool_name: tool,
                     search,
+                    account: resolved_account,
                     limit: limit.or(config.default_query_limit).unwrap_or(50),
                 };
                 let format = if json {
@@ -394,11 +419,20 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Stats { since, json } => {
+        Commands::Stats {
+            since,
+            account,
+            json,
+        } => {
+            let resolved_account = match account {
+                Some(a) => Some(db::resolve_account_filter(&pool, &a).await.unwrap_or(a)),
+                None => None,
+            };
             if let Err(e) = cmd_stats::run(
                 &pool,
                 &db_path,
                 since.as_deref(),
+                resolved_account.as_deref(),
                 json,
                 config.max_session_duration.as_deref(),
             )
@@ -412,9 +446,16 @@ async fn main() {
         Commands::Usage {
             window,
             weekly,
+            account,
             json,
         } => {
-            if let Err(e) = cmd_usage::run(&pool, &window, &weekly, json).await {
+            let resolved_account = match account {
+                Some(a) => Some(db::resolve_account_filter(&pool, &a).await.unwrap_or(a)),
+                None => None,
+            };
+            if let Err(e) =
+                cmd_usage::run(&pool, &window, &weekly, resolved_account.as_deref(), json).await
+            {
                 eprintln!("scribe: usage error: {e}");
                 std::process::exit(1);
             }

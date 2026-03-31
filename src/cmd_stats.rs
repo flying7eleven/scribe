@@ -27,6 +27,8 @@ struct StatsJson {
     top_directories: Vec<db::DirCount>,
     daily_activity: Vec<DailyActivityEntry>,
     sessions_by_model: Vec<db::ModelSessionCount>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accounts: Vec<db::AccountBreakdown>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +49,7 @@ pub async fn run(
     pool: &SqlitePool,
     db_path: &str,
     since: Option<&str>,
+    account: Option<&str>,
     json: bool,
     max_session_duration: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -64,15 +67,22 @@ pub async fn run(
         .transpose()?;
 
     // Gather all stats
-    let stats = db::get_stats(pool, since_ref).await?;
-    let avg_dur = db::avg_session_duration(pool, since_ref, max_dur_secs).await?;
-    let tools = db::top_tools(pool, since_ref, 10).await?;
-    let event_types = db::event_type_breakdown(pool, since_ref).await?;
-    let errors = db::error_summary(pool, since_ref).await?;
-    let dirs = db::top_directories(pool, since_ref, 5).await?;
-    let activity = db::daily_activity(pool, since_ref).await?;
+    let stats = db::get_stats(pool, since_ref, account).await?;
+    let avg_dur = db::avg_session_duration(pool, since_ref, max_dur_secs, account).await?;
+    let tools = db::top_tools(pool, since_ref, 10, account).await?;
+    let event_types = db::event_type_breakdown(pool, since_ref, account).await?;
+    let errors = db::error_summary(pool, since_ref, account).await?;
+    let dirs = db::top_directories(pool, since_ref, 5, account).await?;
+    let activity = db::daily_activity(pool, since_ref, account).await?;
     let filled = fill_zero_days(&activity);
-    let models = db::sessions_by_model(pool, since_ref).await?;
+    let models = db::sessions_by_model(pool, since_ref, account).await?;
+
+    // Per-account breakdown (only when not filtering by specific account)
+    let accounts = if account.is_none() {
+        db::account_breakdown(pool, since_ref).await?
+    } else {
+        Vec::new()
+    };
 
     if json {
         return run_json(
@@ -86,6 +96,7 @@ pub async fn run(
             &filled,
             models,
             max_dur_secs,
+            &accounts,
         );
     }
 
@@ -101,6 +112,7 @@ pub async fn run(
         &filled,
         &models,
         max_session_duration,
+        &accounts,
     )
 }
 
@@ -117,6 +129,7 @@ fn run_json(
     filled: &[(String, i64)],
     models: Vec<db::ModelSessionCount>,
     max_session_duration_seconds: Option<f64>,
+    accounts: &[db::AccountBreakdown],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
@@ -147,6 +160,7 @@ fn run_json(
         top_directories: dirs,
         daily_activity,
         sessions_by_model: models,
+        accounts: accounts.to_vec(),
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -167,6 +181,7 @@ fn run_text(
     filled: &[(String, i64)],
     models: &[db::ModelSessionCount],
     max_session_duration: Option<&str>,
+    accounts: &[db::AccountBreakdown],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file_size = std::fs::metadata(db_path)
         .map(|m| format_size(m.len()))
@@ -325,6 +340,21 @@ fn run_text(
         }
     }
 
+    // ── By Account (only when multiple accounts exist) ──
+    if accounts.len() > 1 {
+        println!();
+        println!("By Account:");
+        for a in accounts {
+            let label = a.account_email.as_deref().unwrap_or(&a.account_id);
+            println!(
+                "  {:<30} {} events   {} sessions",
+                label,
+                format_count(a.event_count),
+                format_count(a.session_count)
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -398,7 +428,7 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = db::get_stats(&pool, None).await.unwrap();
+        let stats = db::get_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.event_count, 2);
         assert_eq!(stats.session_count, 2);
         assert!(stats.oldest_event.is_some());
@@ -411,7 +441,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let pool = db::connect(db_path.to_str().unwrap()).await.unwrap();
 
-        let stats = db::get_stats(&pool, None).await.unwrap();
+        let stats = db::get_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.event_count, 0);
         assert_eq!(stats.session_count, 0);
         assert!(stats.oldest_event.is_none());
