@@ -26,6 +26,7 @@ pub async fn run(
         event_type: None,
         tool_name: None,
         search: None,
+        account: None,
         limit: 100_000, // high limit for classification runs
     };
     let events = db::query_events(pool, &filter).await?;
