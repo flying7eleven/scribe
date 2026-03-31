@@ -1,5 +1,6 @@
 #[cfg(feature = "guard")]
 pub mod classify;
+mod cmd_account;
 mod cmd_backfill;
 #[cfg(feature = "guard")]
 mod cmd_classify;
@@ -167,6 +168,11 @@ enum Commands {
         #[command(subcommand)]
         command: cmd_sync::SyncCommand,
     },
+    /// Manage accounts
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
     /// Backfill detail tables from existing event raw_payload data
     Backfill {
         /// Show what would be backfilled without modifying the database
@@ -206,6 +212,16 @@ enum QuerySub {
         /// Output as CSV
         #[arg(long, conflicts_with = "json")]
         csv: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// List all known accounts with session/event counts
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -467,6 +483,14 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Account { command } => match command {
+            AccountCommand::List { json } => {
+                if let Err(e) = cmd_account::run_list(&pool, json).await {
+                    eprintln!("scribe: account error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Backfill {
             dry_run,
             batch_size,

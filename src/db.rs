@@ -460,6 +460,47 @@ pub async fn resolve_account_filter(
     Ok(input.to_string())
 }
 
+/// Account summary for `scribe account list`.
+#[derive(Debug, Serialize)]
+pub struct AccountListRow {
+    pub account_id: String,
+    pub account_email: Option<String>,
+    pub session_count: i64,
+    pub event_count: i64,
+    pub last_seen: String,
+}
+
+/// List all known accounts with their session/event counts and last_seen.
+/// Sorted by last_seen descending (most recent first).
+pub async fn account_list(
+    pool: &SqlitePool,
+) -> Result<Vec<AccountListRow>, Box<dyn std::error::Error>> {
+    let rows: Vec<(String, Option<String>, i64, i64, String)> = sqlx::query_as(
+        "SELECT s.account_id, s.account_email, \
+         COUNT(DISTINCT s.session_id) as session_count, \
+         SUM(s.event_count) as event_count, \
+         MAX(s.last_seen) as last_seen \
+         FROM sessions s \
+         GROUP BY s.account_id \
+         ORDER BY last_seen DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(account_id, account_email, session_count, event_count, last_seen)| AccountListRow {
+                account_id,
+                account_email,
+                session_count,
+                event_count,
+                last_seen,
+            },
+        )
+        .collect())
+}
+
 /// Per-account event and session counts.
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountBreakdown {
