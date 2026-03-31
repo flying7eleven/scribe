@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs},
     Frame,
 };
 
@@ -28,6 +28,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.show_help {
         help::draw_help(frame);
     }
+
+    if app.show_account_selector {
+        draw_account_selector(frame, app);
+    }
 }
 
 /// Draw the tab bar at the top of the screen.
@@ -38,8 +42,13 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(i, tab)| Line::from(Span::raw(format!(" {} {} ", i + 1, tab.title()))))
         .collect();
 
+    let title = if let Some(ref acct) = app.account_filter {
+        format!(" scribe tui [account: {acct}] ")
+    } else {
+        " scribe tui ".to_string()
+    };
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" scribe tui "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .select(app.active_tab.index())
         .highlight_style(
             Style::default()
@@ -81,6 +90,7 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
 
     let header = Row::new(vec![
         Cell::from("Session ID"),
+        Cell::from("Account"),
         Cell::from("First Seen"),
         Cell::from("Last Seen"),
         Cell::from("CWD"),
@@ -110,8 +120,16 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
                 &s.session_id
             };
 
+            let account_label = s.account_email.as_deref().unwrap_or(&s.account_id);
+            let account_short = if account_label.len() > 24 {
+                &account_label[..24]
+            } else {
+                account_label
+            };
+
             Row::new(vec![
                 Cell::from(sid.to_string()),
+                Cell::from(account_short.to_string()),
                 Cell::from(format_timestamp(&s.first_seen)),
                 Cell::from(format_timestamp(&s.last_seen)),
                 Cell::from(
@@ -130,9 +148,10 @@ fn draw_sessions_tab(frame: &mut Frame, app: &App, area: Rect) {
         rows,
         [
             Constraint::Length(14),
+            Constraint::Length(26),
             Constraint::Length(21),
             Constraint::Length(21),
-            Constraint::Min(20),
+            Constraint::Min(16),
             Constraint::Length(8),
         ],
     )
@@ -907,4 +926,55 @@ fn draw_rules_pane(frame: &mut Frame, policy: &super::tabs::policy::PolicyState,
     );
 
     frame.render_widget(table, area);
+}
+
+/// Draw the account selector overlay.
+fn draw_account_selector(frame: &mut Frame, app: &App) {
+    let height = (app.known_accounts.len() as u16 + 4).min(20);
+    let area = centered_rect(40, height, frame.area());
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // "All" option
+    let all_style = if app.account_selector_index == 0 {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    items.push(ListItem::new("  All accounts").style(all_style));
+
+    // Account options
+    for (i, account) in app.known_accounts.iter().enumerate() {
+        let style = if app.account_selector_index == i + 1 {
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {account}")).style(style));
+    }
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Select Account ")
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(list, area);
+}
+
+/// Create a centered rect of fixed width percentage and height in lines.
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .split(area);
+    let horizontal = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .split(vertical[0]);
+    horizontal[0]
 }

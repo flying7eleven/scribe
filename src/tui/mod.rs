@@ -49,10 +49,16 @@ pub async fn run(
     loop {
         // Lazy-load data for the active tab
         if app.active_tab == Tab::Sessions && !app.sessions.loaded {
-            let _ = app.sessions.load(pool, app.since.as_deref()).await;
+            let _ = app
+                .sessions
+                .load(pool, app.since.as_deref(), app.account_filter.as_deref())
+                .await;
         }
         if app.active_tab == Tab::Events && !app.events.loaded {
-            let _ = app.events.load(pool, app.since.as_deref()).await;
+            let _ = app
+                .events
+                .load(pool, app.since.as_deref(), app.account_filter.as_deref())
+                .await;
         }
         if app.active_tab == Tab::Stats && !app.stats.loaded {
             let _ = app
@@ -96,10 +102,62 @@ pub async fn run(
                     continue;
                 }
 
+                // Account selector overlay captures input when active
+                if app.show_account_selector {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('a') => {
+                            app.show_account_selector = false;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            let len = app.known_accounts.len() + 1; // +1 for "All"
+                            app.account_selector_index = (app.account_selector_index + 1) % len;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            let len = app.known_accounts.len() + 1;
+                            app.account_selector_index =
+                                (app.account_selector_index + len - 1) % len;
+                        }
+                        KeyCode::Enter => {
+                            if app.account_selector_index == 0 {
+                                app.account_filter = None;
+                            } else {
+                                app.account_filter = Some(
+                                    app.known_accounts[app.account_selector_index - 1].clone(),
+                                );
+                            }
+                            app.show_account_selector = false;
+                            // Invalidate loaded state so tabs refresh with new filter
+                            app.sessions.loaded = false;
+                            app.events.loaded = false;
+                            app.stats.loaded = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Global keybindings
                 match key.code {
                     KeyCode::Char('q') => app.quit(),
                     KeyCode::Char('?') => app.toggle_help(),
+                    KeyCode::Char('a') => {
+                        // Load known accounts from DB and show selector
+                        if let Ok(accounts) = crate::db::account_breakdown(pool, None).await {
+                            app.known_accounts = accounts
+                                .iter()
+                                .map(|a| {
+                                    a.account_email
+                                        .as_deref()
+                                        .unwrap_or(&a.account_id)
+                                        .to_string()
+                                })
+                                .collect();
+                            if !app.known_accounts.is_empty() {
+                                app.account_selector_index = 0;
+                                app.show_account_selector = true;
+                            }
+                        }
+                    }
                     KeyCode::Char('/') if matches!(app.active_tab, Tab::Sessions | Tab::Events) => {
                         app.filter.activate();
                     }

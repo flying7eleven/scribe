@@ -51,6 +51,10 @@ pub fn draw_help(frame: &mut Frame) {
             Span::raw("Filter (Sessions, Events)"),
         ]),
         Line::from(vec![
+            Span::styled("  a         ", Style::default().fg(Color::Cyan)),
+            Span::raw("Select account filter"),
+        ]),
+        Line::from(vec![
             Span::styled("  Esc       ", Style::default().fg(Color::Cyan)),
             Span::raw("Close filter / collapse"),
         ]),

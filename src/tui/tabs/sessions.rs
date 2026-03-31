@@ -22,10 +22,11 @@ impl SessionsState {
         &mut self,
         pool: &SqlitePool,
         since: Option<&str>,
+        account: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let filter = db::SessionFilter {
             since: since.map(String::from),
-            account: None,
+            account: account.map(String::from),
             limit: 500,
         };
         self.sessions = db::query_sessions(pool, &filter).await?;

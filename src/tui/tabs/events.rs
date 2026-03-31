@@ -38,6 +38,7 @@ impl EventsState {
         &mut self,
         pool: &SqlitePool,
         since: Option<&str>,
+        account: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let filter = db::EventFilter {
             since: since.map(String::from),
@@ -46,7 +47,7 @@ impl EventsState {
             event_type: None,
             tool_name: None,
             search: None,
-            account: None,
+            account: account.map(String::from),
             limit: 500,
         };
         self.events = db::query_events(pool, &filter).await?;
@@ -148,6 +149,8 @@ pub fn format_structured_detail(event: &EventRow) -> Vec<String> {
         lines.push(format!("  Tool Name:     {tool}"));
     }
     lines.push(format!("  Session:       {}", &event.session_id));
+    let account_label = event.account_email.as_deref().unwrap_or(&event.account_id);
+    lines.push(format!("  Account:       {account_label}"));
     if let Some(ref cwd) = event.cwd {
         lines.push(format!("  CWD:           {cwd}"));
     }

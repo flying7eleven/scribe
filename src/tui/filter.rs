@@ -59,11 +59,13 @@ pub fn filter_sessions(filter: &FilterState, sessions: &[crate::db::SessionRow])
         .enumerate()
         .filter(|(_, s)| {
             let searchable = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {} {}",
                 s.session_id,
                 s.first_seen,
                 s.last_seen,
-                s.cwd.as_deref().unwrap_or("")
+                s.cwd.as_deref().unwrap_or(""),
+                s.account_id,
+                s.account_email.as_deref().unwrap_or("")
             );
             filter.matches(&searchable)
         })
@@ -81,11 +83,13 @@ pub fn filter_events(filter: &FilterState, events: &[crate::db::EventRow]) -> Ve
         .enumerate()
         .filter(|(_, e)| {
             let searchable = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {} {}",
                 e.event_type,
                 e.tool_name.as_deref().unwrap_or(""),
                 e.session_id,
                 e.timestamp,
+                e.account_id,
+                e.account_email.as_deref().unwrap_or(""),
             );
             filter.matches(&searchable)
         })

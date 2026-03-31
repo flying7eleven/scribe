@@ -71,6 +71,7 @@ impl Tab {
 pub struct App {
     pub active_tab: Tab,
     pub show_help: bool,
+    pub show_account_selector: bool,
     pub should_quit: bool,
     #[allow(dead_code)] // consumed by Live tab (US-0031)
     pub tick_rate: Duration,
@@ -83,6 +84,12 @@ pub struct App {
     #[cfg(feature = "guard")]
     pub policy: PolicyState,
     pub filter: FilterState,
+    /// Active account filter (None = all accounts).
+    pub account_filter: Option<String>,
+    /// Known accounts for the account selector overlay.
+    pub known_accounts: Vec<String>,
+    /// Selected index in the account selector.
+    pub account_selector_index: usize,
 }
 
 impl App {
@@ -90,6 +97,7 @@ impl App {
         Self {
             active_tab: Tab::Sessions,
             show_help: false,
+            show_account_selector: false,
             should_quit: false,
             tick_rate,
             since,
@@ -101,6 +109,9 @@ impl App {
             #[cfg(feature = "guard")]
             policy: PolicyState::new(),
             filter: FilterState::new(),
+            account_filter: None,
+            known_accounts: Vec::new(),
+            account_selector_index: 0,
         }
     }
 
