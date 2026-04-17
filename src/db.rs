@@ -1087,7 +1087,7 @@ pub async fn error_summary(
                 .into_iter()
                 .map(|(error_type, count)| StopFailureType { error_type, count })
                 .collect();
-            fallback_types.sort_by(|a, b| b.count.cmp(&a.count));
+            fallback_types.sort_by_key(|b| std::cmp::Reverse(b.count));
             fallback_types
         } else {
             types

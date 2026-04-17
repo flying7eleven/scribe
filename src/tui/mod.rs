@@ -275,10 +275,8 @@ fn handle_events_key(app: &mut App, key: KeyCode) {
                 app.events.clear_session_filter();
             }
         }
-        KeyCode::Backspace => {
-            if app.events.session_filter.is_some() {
-                app.events.clear_session_filter();
-            }
+        KeyCode::Backspace if app.events.session_filter.is_some() => {
+            app.events.clear_session_filter();
         }
         _ => {}
     }
