@@ -89,11 +89,14 @@ enum Commands {
     /// Generate Claude Code hook configuration
     Init {
         /// Write to .claude/settings.json (project-level)
-        #[arg(long, conflicts_with = "global")]
+        #[arg(long, conflicts_with_all = ["global", "config_dir"])]
         project: bool,
-        /// Write to ~/.claude/settings.json (global)
-        #[arg(long, conflicts_with = "project")]
+        /// Write to ~/.claude/settings.json (global; respects CLAUDE_CONFIG_DIR)
+        #[arg(long, conflicts_with_all = ["project", "config_dir"])]
         global: bool,
+        /// Write to <path>/settings.json (arbitrary config directory)
+        #[arg(long, conflicts_with_all = ["project", "global"])]
+        config_dir: Option<PathBuf>,
         /// Include scribe guard on PreToolUse for policy enforcement
         #[cfg(feature = "guard")]
         #[arg(long)]
@@ -254,10 +257,13 @@ async fn main() {
         Commands::Init {
             project,
             global,
+            config_dir,
             #[cfg(feature = "guard")]
             with_guard,
         } => {
-            let target = if project {
+            let target = if let Some(dir) = config_dir {
+                cmd_init::OutputTarget::ConfigDir(dir)
+            } else if project {
                 cmd_init::OutputTarget::Project
             } else if global {
                 cmd_init::OutputTarget::Global

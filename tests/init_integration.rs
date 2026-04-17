@@ -93,6 +93,7 @@ fn test_init_global_creates_file() {
     let output = scribe_bin()
         .args(["init", "--global"])
         .env("HOME", dir.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
 
@@ -273,4 +274,111 @@ fn test_init_no_db_created() {
         .unwrap();
 
     assert!(!db_path.exists(), "init should NOT create a database file");
+}
+
+// ── --config-dir tests (US-0071) ──
+
+#[test]
+fn test_init_config_dir_creates_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("my-profile");
+
+    let output = scribe_bin()
+        .args(["init", "--config-dir", config_dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let path = config_dir.join("settings.json");
+    assert!(path.exists(), "settings.json should be created in config-dir");
+
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("wrote hooks to"));
+}
+
+#[test]
+fn test_init_config_dir_merges_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("existing-profile");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("settings.json"),
+        r#"{"permissions":{"allow":["Bash"]}}"#,
+    )
+    .unwrap();
+
+    let output = scribe_bin()
+        .args(["init", "--config-dir", config_dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert!(content["permissions"]["allow"].is_array());
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
+}
+
+#[test]
+fn test_init_config_dir_conflicts_with_global() {
+    let output = scribe_bin()
+        .args(["init", "--config-dir", "/tmp/foo", "--global"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "stderr should mention conflict: {stderr}"
+    );
+}
+
+#[test]
+fn test_init_config_dir_conflicts_with_project() {
+    let output = scribe_bin()
+        .args(["init", "--config-dir", "/tmp/foo", "--project"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "stderr should mention conflict: {stderr}"
+    );
+}
+
+#[test]
+fn test_init_global_respects_claude_config_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let custom_dir = dir.path().join("custom-claude");
+    std::fs::create_dir_all(&custom_dir).unwrap();
+
+    let output = scribe_bin()
+        .args(["init", "--global"])
+        .env("CLAUDE_CONFIG_DIR", custom_dir.to_str().unwrap())
+        // Override HOME to prevent writing to real home
+        .env("HOME", dir.path().join("fake-home"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let path = custom_dir.join("settings.json");
+    assert!(
+        path.exists(),
+        "should write to CLAUDE_CONFIG_DIR/settings.json"
+    );
+
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
 }

@@ -36,6 +36,7 @@ pub enum OutputTarget {
     Stdout,
     Project,
     Global,
+    ConfigDir(PathBuf),
 }
 
 /// Generate the complete hooks configuration as a serde_json::Value.
@@ -100,11 +101,27 @@ pub fn run(
             eprintln!("scribe: wrote hooks to .claude/settings.json");
         }
         OutputTarget::Global => {
-            let home = match home_override {
-                Some(h) => h,
-                None => dirs::home_dir().ok_or("could not determine home directory")?,
+            let base = if let Some(h) = home_override {
+                h.join(".claude")
+            } else if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+                if !config_dir.is_empty() {
+                    PathBuf::from(config_dir)
+                } else {
+                    dirs::home_dir()
+                        .ok_or("could not determine home directory")?
+                        .join(".claude")
+                }
+            } else {
+                dirs::home_dir()
+                    .ok_or("could not determine home directory")?
+                    .join(".claude")
             };
-            let path = home.join(".claude").join("settings.json");
+            let path = base.join("settings.json");
+            merge_and_write(&path, &config)?;
+            eprintln!("scribe: wrote hooks to {}", path.display());
+        }
+        OutputTarget::ConfigDir(dir) => {
+            let path = dir.join("settings.json");
             merge_and_write(&path, &config)?;
             eprintln!("scribe: wrote hooks to {}", path.display());
         }
@@ -577,5 +594,94 @@ mod tests {
         let config = generate_hooks_config(true);
         let guard = &config["hooks"]["PreToolUse"][0]["hooks"][0];
         assert_eq!(guard["timeout"], 10);
+    }
+
+    // ── ConfigDir target tests (US-0071) ──
+
+    #[test]
+    fn test_run_config_dir_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("my-profile");
+        run(OutputTarget::ConfigDir(config_dir.clone()), None, false).unwrap();
+
+        let path = config_dir.join("settings.json");
+        assert!(path.exists());
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
+    }
+
+    #[test]
+    fn test_run_config_dir_merges_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("my-profile");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.json"),
+            r#"{"permissions":{"allow":["Bash"]}}"#,
+        )
+        .unwrap();
+
+        run(OutputTarget::ConfigDir(config_dir.clone()), None, false).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(config_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(content["permissions"]["allow"].is_array());
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
+    }
+
+    #[test]
+    fn test_run_config_dir_with_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("guard-profile");
+        run(OutputTarget::ConfigDir(config_dir.clone()), None, true).unwrap();
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(config_dir.join("settings.json")).unwrap())
+                .unwrap();
+        let pre = content["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0]["command"], "scribe guard");
+        assert_eq!(pre[1]["command"], "scribe log");
+    }
+
+    #[test]
+    fn test_global_respects_claude_config_dir_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom_dir = dir.path().join("custom-claude");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+
+        // Set CLAUDE_CONFIG_DIR and run Global (without home_override so it reads the env)
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", custom_dir.to_str().unwrap()) };
+        let result = run(OutputTarget::Global, None, false);
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+
+        result.unwrap();
+        let path = custom_dir.join("settings.json");
+        assert!(path.exists());
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
+    }
+
+    #[test]
+    fn test_global_home_override_takes_precedence_over_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().join("home");
+        let env_dir = dir.path().join("env-claude");
+        std::fs::create_dir_all(&env_dir).unwrap();
+
+        // home_override should win over CLAUDE_CONFIG_DIR
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", env_dir.to_str().unwrap()) };
+        let result = run(OutputTarget::Global, Some(home_dir.clone()), false);
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+
+        result.unwrap();
+        // Should write to home_dir/.claude/settings.json, not env_dir
+        assert!(home_dir.join(".claude").join("settings.json").exists());
+        assert!(!env_dir.join("settings.json").exists());
     }
 }
