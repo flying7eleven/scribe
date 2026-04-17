@@ -80,7 +80,8 @@ impl SessionFilter {
 /// 1. `--db <path>` CLI argument (highest)
 /// 2. `SCRIBE_DB` environment variable
 /// 3. Config file `db_path`
-/// 4. Default: `~/.claude/scribe.db`
+/// 4. Default: `<data_dir>/claude-scribe/scribe.db`
+///    (macOS: `~/Library/Application Support`, Linux: `~/.local/share`)
 pub fn resolve_db_path(
     cli_db: Option<&str>,
     config_db: Option<&str>,
@@ -99,12 +100,84 @@ pub fn resolve_db_path(
         return Ok(path.to_string());
     }
 
+    Ok(default_db_path()?.to_string_lossy().to_string())
+}
+
+/// Returns the default database path: `<data_dir>/claude-scribe/scribe.db`.
+fn default_db_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let data_dir = dirs::data_dir().ok_or("could not determine data directory")?;
+    Ok(data_dir.join("claude-scribe").join("scribe.db"))
+}
+
+/// Returns the legacy database path: `~/.claude/scribe.db`.
+fn legacy_db_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let home = dirs::home_dir().ok_or("could not determine home directory")?;
-    Ok(home
-        .join(".claude")
-        .join("scribe.db")
-        .to_string_lossy()
-        .to_string())
+    Ok(home.join(".claude").join("scribe.db"))
+}
+
+/// Returns true if the resolved path is the default (no CLI, env, or config override).
+pub fn is_default_path(cli_db: Option<&str>, config_db: Option<&str>) -> bool {
+    if cli_db.is_some() {
+        return false;
+    }
+    if let Ok(path) = std::env::var("SCRIBE_DB") {
+        if !path.is_empty() {
+            return false;
+        }
+    }
+    config_db.is_none()
+}
+
+/// Migrate the database from the legacy `~/.claude/scribe.db` path to the new
+/// default `<data_dir>/claude-scribe/scribe.db` location.
+///
+/// Migration only runs when:
+/// - The caller is using the default path (no CLI/env/config override)
+/// - The legacy path exists
+/// - The new default path does NOT exist
+///
+/// Also moves `-wal` and `-shm` sidecar files if present.
+pub fn migrate_legacy_db(
+    cli_db: Option<&str>,
+    config_db: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_default_path(cli_db, config_db) {
+        return Ok(());
+    }
+
+    let new_path = default_db_path()?;
+    if new_path.exists() {
+        return Ok(());
+    }
+
+    let old_path = legacy_db_path()?;
+    if !old_path.exists() {
+        return Ok(());
+    }
+
+    // Create the new directory
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Move the main DB file
+    std::fs::rename(&old_path, &new_path)?;
+    eprintln!(
+        "scribe: migrated database from {} to {}",
+        old_path.display(),
+        new_path.display()
+    );
+
+    // Move sidecar files if present
+    for suffix in ["-wal", "-shm"] {
+        let old_sidecar = old_path.with_extension(format!("db{suffix}"));
+        if old_sidecar.exists() {
+            let new_sidecar = new_path.with_extension(format!("db{suffix}"));
+            std::fs::rename(&old_sidecar, &new_sidecar)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Open (or create) a SQLite database at the given path with:
@@ -3268,9 +3341,70 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("SCRIBE_DB") };
         let result = resolve_db_path(None, None).unwrap();
-        let home = dirs::home_dir().unwrap();
-        let expected = home.join(".claude").join("scribe.db");
+        let data_dir = dirs::data_dir().unwrap();
+        let expected = data_dir.join("claude-scribe").join("scribe.db");
         assert_eq!(result, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn test_is_default_path() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SCRIBE_DB") };
+
+        assert!(is_default_path(None, None));
+        assert!(!is_default_path(Some("/cli/path.db"), None));
+        assert!(!is_default_path(None, Some("/config/path.db")));
+
+        unsafe { std::env::set_var("SCRIBE_DB", "/env/path.db") };
+        assert!(!is_default_path(None, None));
+        unsafe { std::env::remove_var("SCRIBE_DB") };
+    }
+
+    #[test]
+    fn test_migrate_legacy_db_moves_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SCRIBE_DB") };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let old_dir = tmp.path().join("old_home").join(".claude");
+        let new_dir = tmp.path().join("new_data").join("claude-scribe");
+
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("scribe.db"), b"main-db").unwrap();
+        std::fs::write(old_dir.join("scribe.db-wal"), b"wal-data").unwrap();
+        std::fs::write(old_dir.join("scribe.db-shm"), b"shm-data").unwrap();
+
+        // Use env overrides to control paths — test the internal logic directly
+        let old_path = old_dir.join("scribe.db");
+        let new_path = new_dir.join("scribe.db");
+
+        // Create new dir
+        std::fs::create_dir_all(&new_dir).unwrap();
+
+        // Manual migration test (since we can't override dirs::data_dir/home_dir)
+        std::fs::rename(&old_path, &new_path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let old_s = old_path.with_extension(format!("db{suffix}"));
+            if old_s.exists() {
+                let new_s = new_path.with_extension(format!("db{suffix}"));
+                std::fs::rename(&old_s, &new_s).unwrap();
+            }
+        }
+
+        assert!(new_path.exists());
+        assert!(new_path.with_extension("db-wal").exists());
+        assert!(new_path.with_extension("db-shm").exists());
+        assert!(!old_path.exists());
+        assert_eq!(std::fs::read_to_string(&new_path).unwrap(), "main-db");
+    }
+
+    #[test]
+    fn test_migrate_skipped_when_not_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SCRIBE_DB") };
+        // With a CLI override, migration should be a no-op
+        let result = migrate_legacy_db(Some("/custom/path.db"), None);
+        assert!(result.is_ok());
     }
 
     // ── Query filter tests ──

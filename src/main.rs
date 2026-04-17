@@ -283,6 +283,12 @@ async fn main() {
 
     // Commands that need a database connection
     let cli_db = cli.db.as_ref().and_then(|p| p.to_str());
+
+    // Migrate legacy DB path (~/.claude/scribe.db) to new default location
+    if let Err(e) = db::migrate_legacy_db(cli_db, config.db_path.as_deref()) {
+        eprintln!("scribe: db migration warning: {e}");
+    }
+
     let db_path = match db::resolve_db_path(cli_db, config.db_path.as_deref()) {
         Ok(path) => path,
         Err(e) => {
