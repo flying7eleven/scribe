@@ -206,6 +206,10 @@ fn is_scribe_entry(entry: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that manipulate environment variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // ── S01 tests (JSON generation) ──
 
@@ -649,6 +653,7 @@ mod tests {
 
     #[test]
     fn test_global_respects_claude_config_dir_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let custom_dir = dir.path().join("custom-claude");
         std::fs::create_dir_all(&custom_dir).unwrap();
@@ -669,6 +674,7 @@ mod tests {
 
     #[test]
     fn test_global_home_override_takes_precedence_over_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().join("home");
         let env_dir = dir.path().join("env-claude");
