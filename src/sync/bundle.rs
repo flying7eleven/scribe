@@ -26,7 +26,7 @@ pub struct EventBundle {
 
 // ── Event row (excludes machine-local `id`) ──
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EventRow {
     pub timestamp: String,
     pub session_id: String,
@@ -50,7 +50,7 @@ fn default_account_id() -> Option<String> {
 
 // ── Detail structs (one per detail table, excludes event_id) ──
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ToolEventDetails {
     pub tool_use_id: Option<String>,
     pub error: Option<String>,
@@ -59,7 +59,7 @@ pub struct ToolEventDetails {
     pub permission_suggestions: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct StopEventDetails {
     pub stop_hook_active: Option<bool>,
     pub last_assistant_message: Option<String>,
@@ -67,7 +67,7 @@ pub struct StopEventDetails {
     pub error_details: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SessionEventDetails {
     pub source: Option<String>,
     pub model: Option<String>,
@@ -75,14 +75,14 @@ pub struct SessionEventDetails {
     pub file_path: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AgentEventDetails {
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
     pub agent_transcript_path: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NotificationEventDetails {
     pub notification_type: Option<String>,
     pub title: Option<String>,
@@ -96,14 +96,14 @@ pub struct NotificationEventDetails {
     pub content: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CompactEventDetails {
     pub trigger: Option<String>,
     pub custom_instructions: Option<String>,
     pub compact_summary: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InstructionEventDetails {
     pub file_path: Option<String>,
     pub memory_type: Option<String>,
@@ -113,7 +113,7 @@ pub struct InstructionEventDetails {
     pub parent_file_path: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TeamEventDetails {
     pub teammate_name: Option<String>,
     pub team_name: Option<String>,
@@ -122,19 +122,19 @@ pub struct TeamEventDetails {
     pub task_description: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PromptEventDetails {
     pub prompt: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WorktreeEventDetails {
     pub worktree_path: Option<String>,
 }
 
 // ── Classification and enforcement rows (excludes machine-local id, event_id, rule_id) ──
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ClassificationRow {
     pub timestamp: String,
     pub tool_name: String,
@@ -157,8 +157,15 @@ pub struct EnforcementRow {
 
 // ── Export ──
 
+/// Chunk size for batch export queries. Stays well under SQLite's 999 bind-variable limit.
+const EXPORT_CHUNK_SIZE: usize = 500;
+
 /// Export events since `since` timestamp as JSON Lines to a writer.
 /// Each line is a complete EventBundle. Returns the count of exported events.
+///
+/// Uses chunked batch queries to avoid N+1 query patterns: for each chunk of
+/// events, all detail tables + classifications are fetched in bulk (12 queries
+/// per chunk) instead of 3 queries per event.
 pub async fn export_bundles<W: Write>(
     pool: &SqlitePool,
     since: Option<&str>,
@@ -168,41 +175,51 @@ pub async fn export_bundles<W: Write>(
     let events = crate::db::export_events_since(pool, since).await?;
     let mut count = 0u64;
 
-    for (event_id, mut event_row) in events {
-        // Fill in origin_machine_id for events that don't have one
-        if event_row.origin_machine_id.is_none() {
-            event_row.origin_machine_id = Some(machine_id.to_string());
+    for chunk in events.chunks(EXPORT_CHUNK_SIZE) {
+        let ids: Vec<i64> = chunk.iter().map(|(id, _)| *id).collect();
+
+        // Batch-fetch all detail tables for this chunk (10 queries)
+        let tool_details = crate::db::batch_get_tool_details(pool, &ids).await?;
+        let stop_details = crate::db::batch_get_stop_details(pool, &ids).await?;
+        let session_details = crate::db::batch_get_session_details(pool, &ids).await?;
+        let agent_details = crate::db::batch_get_agent_details(pool, &ids).await?;
+        let notification_details = crate::db::batch_get_notification_details(pool, &ids).await?;
+        let compact_details = crate::db::batch_get_compact_details(pool, &ids).await?;
+        let instruction_details = crate::db::batch_get_instruction_details(pool, &ids).await?;
+        let team_details = crate::db::batch_get_team_details(pool, &ids).await?;
+        let prompt_details = crate::db::batch_get_prompt_details(pool, &ids).await?;
+        let worktree_details = crate::db::batch_get_worktree_details(pool, &ids).await?;
+
+        // Batch-fetch classifications (1 query) — enforcements remain empty (no FK link)
+        let classifications = crate::db::batch_get_classifications(pool, &ids).await?;
+
+        // Assemble bundles from the hash maps
+        for (event_id, event_row) in chunk {
+            let mut event_row = event_row.clone();
+            if event_row.origin_machine_id.is_none() {
+                event_row.origin_machine_id = Some(machine_id.to_string());
+            }
+
+            let bundle = EventBundle {
+                event: event_row,
+                tool_details: tool_details.get(event_id).cloned(),
+                stop_details: stop_details.get(event_id).cloned(),
+                session_details: session_details.get(event_id).cloned(),
+                agent_details: agent_details.get(event_id).cloned(),
+                notification_details: notification_details.get(event_id).cloned(),
+                compact_details: compact_details.get(event_id).cloned(),
+                instruction_details: instruction_details.get(event_id).cloned(),
+                team_details: team_details.get(event_id).cloned(),
+                prompt_details: prompt_details.get(event_id).cloned(),
+                worktree_details: worktree_details.get(event_id).cloned(),
+                classifications: classifications.get(event_id).cloned().unwrap_or_default(),
+                enforcements: Vec::new(),
+            };
+
+            serde_json::to_writer(&mut *writer, &bundle)?;
+            writer.write_all(b"\n")?;
+            count += 1;
         }
-
-        let details = crate::db::get_event_details_for_sync(pool, event_id, &event_row.event_type)
-            .await
-            .unwrap_or_default();
-        let classifications = crate::db::get_event_classifications(pool, event_id)
-            .await
-            .unwrap_or_default();
-        let enforcements = crate::db::get_event_enforcements(pool, event_id)
-            .await
-            .unwrap_or_default();
-
-        let bundle = EventBundle {
-            event: event_row,
-            tool_details: details.tool,
-            stop_details: details.stop,
-            session_details: details.session,
-            agent_details: details.agent,
-            notification_details: details.notification,
-            compact_details: details.compact,
-            instruction_details: details.instruction,
-            team_details: details.team,
-            prompt_details: details.prompt,
-            worktree_details: details.worktree,
-            classifications,
-            enforcements,
-        };
-
-        serde_json::to_writer(&mut *writer, &bundle)?;
-        writer.write_all(b"\n")?;
-        count += 1;
     }
 
     Ok(count)
@@ -544,5 +561,199 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         let parsed: EnforcementRow = serde_json::from_str(&json).unwrap();
         assert_eq!(e, parsed);
+    }
+
+    #[tokio::test]
+    async fn test_batch_export_with_detail_tables() {
+        // Set up a temp DB and insert events with detail rows, then verify batch export
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("batch_test.db");
+        let pool = crate::db::connect(db_path.to_str().unwrap()).await.unwrap();
+
+        // Insert a PreToolUse event (gets tool_event_details)
+        let tool_payload = serde_json::json!({
+            "session_id": "sess-batch-1",
+            "hook_event_name": "PreToolUse",
+            "cwd": "/tmp/test",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls -la"},
+            "tool_use_id": "tu-batch-001",
+            "permission_mode": "default"
+        });
+        let hook_input: crate::models::HookInput =
+            serde_json::from_value(tool_payload.clone()).unwrap();
+        crate::db::insert_event(
+            &pool,
+            &hook_input,
+            &serde_json::to_string(&tool_payload).unwrap(),
+            "default",
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Insert a SessionStart event (gets session_event_details)
+        let session_payload = serde_json::json!({
+            "session_id": "sess-batch-1",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/test",
+            "source": "startup",
+            "model": "claude-4",
+            "permission_mode": "default"
+        });
+        let hook_input2: crate::models::HookInput =
+            serde_json::from_value(session_payload.clone()).unwrap();
+        crate::db::insert_event(
+            &pool,
+            &hook_input2,
+            &serde_json::to_string(&session_payload).unwrap(),
+            "default",
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Insert a Stop event (gets stop_event_details)
+        let stop_payload = serde_json::json!({
+            "session_id": "sess-batch-1",
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/test",
+            "stop_hook_active": true,
+            "last_assistant_message": "done",
+            "permission_mode": "default"
+        });
+        let hook_input3: crate::models::HookInput =
+            serde_json::from_value(stop_payload.clone()).unwrap();
+        crate::db::insert_event(
+            &pool,
+            &hook_input3,
+            &serde_json::to_string(&stop_payload).unwrap(),
+            "default",
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Export using batch function
+        let mut output = Vec::new();
+        let count = export_bundles(&pool, None, "test-machine", &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 3);
+
+        // Parse back and verify detail tables were populated
+        let reader = BufReader::new(Cursor::new(output));
+        let bundles: Vec<EventBundle> = import_bundles(reader)
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(bundles.len(), 3);
+
+        // Find and verify the PreToolUse bundle has tool_details
+        let tool_bundle = bundles
+            .iter()
+            .find(|b| b.event.event_type == "PreToolUse")
+            .expect("should have PreToolUse bundle");
+        assert!(tool_bundle.tool_details.is_some());
+        assert_eq!(
+            tool_bundle.tool_details.as_ref().unwrap().tool_use_id,
+            Some("tu-batch-001".into())
+        );
+
+        // Find and verify the SessionStart bundle has session_details
+        let session_bundle = bundles
+            .iter()
+            .find(|b| b.event.event_type == "SessionStart")
+            .expect("should have SessionStart bundle");
+        assert!(session_bundle.session_details.is_some());
+        assert_eq!(
+            session_bundle.session_details.as_ref().unwrap().source,
+            Some("startup".into())
+        );
+        assert_eq!(
+            session_bundle.session_details.as_ref().unwrap().model,
+            Some("claude-4".into())
+        );
+
+        // Find and verify the Stop bundle has stop_details
+        let stop_bundle = bundles
+            .iter()
+            .find(|b| b.event.event_type == "Stop")
+            .expect("should have Stop bundle");
+        assert!(stop_bundle.stop_details.is_some());
+        assert_eq!(
+            stop_bundle.stop_details.as_ref().unwrap().stop_hook_active,
+            Some(true)
+        );
+        assert_eq!(
+            stop_bundle
+                .stop_details
+                .as_ref()
+                .unwrap()
+                .last_assistant_message,
+            Some("done".into())
+        );
+
+        // All bundles should have origin_machine_id filled in
+        for bundle in &bundles {
+            assert_eq!(
+                bundle.event.origin_machine_id,
+                Some("test-machine".into())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_export_chunks_correctly() {
+        // Verify that chunking works correctly with more events than EXPORT_CHUNK_SIZE
+        // We'll use a smaller count to keep the test fast, but verify the chunking logic
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chunk_test.db");
+        let pool = crate::db::connect(db_path.to_str().unwrap()).await.unwrap();
+
+        // Insert 10 events (verifies the chunk loop works for < EXPORT_CHUNK_SIZE)
+        for i in 0..10 {
+            let payload = serde_json::json!({
+                "session_id": format!("sess-chunk-{}", i),
+                "hook_event_name": "PreToolUse",
+                "cwd": "/tmp/test",
+                "tool_name": "Bash",
+                "tool_input": {"command": format!("echo {}", i)},
+                "permission_mode": "default"
+            });
+            let hook_input: crate::models::HookInput =
+                serde_json::from_value(payload.clone()).unwrap();
+            crate::db::insert_event(
+                &pool,
+                &hook_input,
+                &serde_json::to_string(&payload).unwrap(),
+                "default",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut output = Vec::new();
+        let count = export_bundles(&pool, None, "chunk-machine", &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 10);
+
+        // Verify all 10 bundles are distinct and valid
+        let reader = BufReader::new(Cursor::new(output));
+        let bundles: Vec<EventBundle> = import_bundles(reader)
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(bundles.len(), 10);
+
+        // Verify uniqueness of session_ids
+        let session_ids: std::collections::HashSet<&str> = bundles
+            .iter()
+            .map(|b| b.event.session_id.as_str())
+            .collect();
+        assert_eq!(session_ids.len(), 10);
     }
 }

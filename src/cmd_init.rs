@@ -629,9 +629,10 @@ mod tests {
 
         run(OutputTarget::ConfigDir(config_dir.clone()), None, false).unwrap();
 
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(config_dir.join("settings.json")).unwrap())
-                .unwrap();
+        let content: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
         assert!(content["permissions"]["allow"].is_array());
         assert_eq!(content["hooks"].as_object().unwrap().len(), 25);
     }
@@ -642,10 +643,13 @@ mod tests {
         let config_dir = dir.path().join("guard-profile");
         run(OutputTarget::ConfigDir(config_dir.clone()), None, true).unwrap();
 
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(config_dir.join("settings.json")).unwrap())
-                .unwrap();
-        let pre = content["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        let content: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        let pre = content["hooks"]["PreToolUse"][0]["hooks"]
+            .as_array()
+            .unwrap();
         assert_eq!(pre.len(), 2);
         assert_eq!(pre[0]["command"], "scribe guard");
         assert_eq!(pre[1]["command"], "scribe log");

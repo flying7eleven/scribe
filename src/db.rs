@@ -2345,7 +2345,10 @@ pub async fn export_events_since(
 }
 
 /// Fetch all detail rows for an event, returning a SyncEventDetails container.
+/// Retained for single-event lookups (TUI detail view, debugging).
+/// Batch export uses `batch_get_*` functions instead (US-0073).
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn get_event_details_for_sync(
     pool: &SqlitePool,
     event_id: i64,
@@ -2571,7 +2574,9 @@ pub async fn get_event_details_for_sync(
 }
 
 /// Fetch classifications linked to an event_id.
+/// Retained for single-event lookups. Batch export uses `batch_get_classifications` (US-0073).
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn get_event_classifications(
     pool: &SqlitePool,
     event_id: i64,
@@ -2599,7 +2604,10 @@ pub async fn get_event_classifications(
 }
 
 /// Fetch enforcements linked to an event_id.
+/// Retained for single-event lookups. Enforcements have no event_id FK,
+/// so this currently returns empty — see US-0073 notes.
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn get_event_enforcements(
     pool: &SqlitePool,
     event_id: i64,
@@ -2619,6 +2627,460 @@ pub async fn get_event_enforcements(
     // in a future enhancement or as part of the full DB export.
     let _ = (pool, event_id);
     Ok(Vec::new())
+}
+
+// ── Batch helpers for sync export (US-0073) ──
+
+/// Build a SQL `IN` placeholder string: `(?, ?, ?, ...)` for the given count.
+fn in_placeholders(count: usize) -> String {
+    let mut s = String::with_capacity(count * 3 + 2);
+    s.push('(');
+    for i in 0..count {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push('?');
+    }
+    s.push(')');
+    s
+}
+
+/// Batch-fetch tool_event_details for a set of event IDs.
+/// Returns a HashMap keyed by event_id.
+#[cfg(feature = "sync")]
+pub async fn batch_get_tool_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::ToolEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, tool_use_id, error, error_details, is_interrupt, permission_suggestions \
+         FROM tool_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::ToolEventDetails {
+                tool_use_id: row.get("tool_use_id"),
+                error: row.get("error"),
+                error_details: row.get("error_details"),
+                is_interrupt: row.get::<Option<i32>, _>("is_interrupt").map(|v| v != 0),
+                permission_suggestions: row.get("permission_suggestions"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch stop_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_stop_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::StopEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, stop_hook_active, last_assistant_message, error, error_details \
+         FROM stop_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::StopEventDetails {
+                stop_hook_active: row
+                    .get::<Option<i32>, _>("stop_hook_active")
+                    .map(|v| v != 0),
+                last_assistant_message: row.get("last_assistant_message"),
+                error: row.get("error"),
+                error_details: row.get("error_details"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch session_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_session_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::SessionEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, source, model, reason, file_path \
+         FROM session_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::SessionEventDetails {
+                source: row.get("source"),
+                model: row.get("model"),
+                reason: row.get("reason"),
+                file_path: row.get("file_path"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch agent_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_agent_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::AgentEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, agent_id, agent_type, agent_transcript_path \
+         FROM agent_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::AgentEventDetails {
+                agent_id: row.get("agent_id"),
+                agent_type: row.get("agent_type"),
+                agent_transcript_path: row.get("agent_transcript_path"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch notification_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_notification_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::NotificationEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, notification_type, title, message, elicitation_id, mcp_server_name, \
+         mode, url, requested_schema, action, content \
+         FROM notification_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::NotificationEventDetails {
+                notification_type: row.get("notification_type"),
+                title: row.get("title"),
+                message: row.get("message"),
+                elicitation_id: row.get("elicitation_id"),
+                mcp_server_name: row.get("mcp_server_name"),
+                mode: row.get("mode"),
+                url: row.get("url"),
+                requested_schema: row.get("requested_schema"),
+                action: row.get("action"),
+                content: row.get("content"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch compact_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_compact_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::CompactEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, `trigger`, custom_instructions, compact_summary \
+         FROM compact_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::CompactEventDetails {
+                trigger: row.get("trigger"),
+                custom_instructions: row.get("custom_instructions"),
+                compact_summary: row.get("compact_summary"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch instruction_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_instruction_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::InstructionEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, file_path, memory_type, load_reason, globs, trigger_file_path, parent_file_path \
+         FROM instruction_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::InstructionEventDetails {
+                file_path: row.get("file_path"),
+                memory_type: row.get("memory_type"),
+                load_reason: row.get("load_reason"),
+                globs: row.get("globs"),
+                trigger_file_path: row.get("trigger_file_path"),
+                parent_file_path: row.get("parent_file_path"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch team_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_team_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::TeamEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, teammate_name, team_name, task_id, task_subject, task_description \
+         FROM team_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::TeamEventDetails {
+                teammate_name: row.get("teammate_name"),
+                team_name: row.get("team_name"),
+                task_id: row.get("task_id"),
+                task_subject: row.get("task_subject"),
+                task_description: row.get("task_description"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch prompt_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_prompt_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::PromptEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, prompt \
+         FROM prompt_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::PromptEventDetails {
+                prompt: row.get("prompt"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch worktree_event_details for a set of event IDs.
+#[cfg(feature = "sync")]
+pub async fn batch_get_worktree_details(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, crate::sync::bundle::WorktreeEventDetails>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, worktree_path \
+         FROM worktree_event_details WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.insert(
+            eid,
+            crate::sync::bundle::WorktreeEventDetails {
+                worktree_path: row.get("worktree_path"),
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batch-fetch classifications for a set of event IDs.
+/// Returns a HashMap where each event_id maps to its list of classifications.
+#[cfg(feature = "sync")]
+pub async fn batch_get_classifications(
+    pool: &SqlitePool,
+    event_ids: &[i64],
+) -> Result<
+    std::collections::HashMap<i64, Vec<crate::sync::bundle::ClassificationRow>>,
+    Box<dyn std::error::Error>,
+> {
+    use sqlx::Row;
+    if event_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = in_placeholders(event_ids.len());
+    let sql = format!(
+        "SELECT event_id, timestamp, tool_name, input_pattern, risk_level, reason, heuristic \
+         FROM classifications WHERE event_id IN {placeholders}"
+    );
+    let mut query = sqlx::query(&sql);
+    for id in event_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut map: std::collections::HashMap<i64, Vec<crate::sync::bundle::ClassificationRow>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let eid: i64 = row.get("event_id");
+        map.entry(eid)
+            .or_default()
+            .push(crate::sync::bundle::ClassificationRow {
+                timestamp: row.get("timestamp"),
+                tool_name: row.get("tool_name"),
+                input_pattern: row.get("input_pattern"),
+                risk_level: row.get("risk_level"),
+                reason: row.get("reason"),
+                heuristic: row.get("heuristic"),
+            });
+    }
+    Ok(map)
 }
 
 /// Check if an event already exists by the dedup composite key.

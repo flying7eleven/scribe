@@ -291,7 +291,10 @@ fn test_init_config_dir_creates_file() {
     assert!(output.status.success());
 
     let path = config_dir.join("settings.json");
-    assert!(path.exists(), "settings.json should be created in config-dir");
+    assert!(
+        path.exists(),
+        "settings.json should be created in config-dir"
+    );
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

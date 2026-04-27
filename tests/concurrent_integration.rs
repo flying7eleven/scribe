@@ -26,9 +26,7 @@ fn init_db(db_str: &str) {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(
-            br#"{"session_id":"seed","hook_event_name":"SessionStart","cwd":"/tmp/init"}"#,
-        )
+        .write_all(br#"{"session_id":"seed","hook_event_name":"SessionStart","cwd":"/tmp/init"}"#)
         .unwrap();
 
     child.wait_with_output().unwrap();
@@ -88,7 +86,16 @@ fn test_concurrent_log_no_lost_events() {
     // Query the DB to verify all concurrent events are present
     // (use --event PreToolUse to exclude the seed SessionStart event)
     let output = scribe_bin()
-        .args(["--db", &db_str, "query", "--event", "PreToolUse", "--limit", &(n * 2).to_string(), "--json"])
+        .args([
+            "--db",
+            &db_str,
+            "query",
+            "--event",
+            "PreToolUse",
+            "--limit",
+            &(n * 2).to_string(),
+            "--json",
+        ])
         .output()
         .unwrap();
 
@@ -215,7 +222,16 @@ fn test_concurrent_different_profiles_staggered() {
 
     // Verify all PreToolUse events are present (one per profile)
     let output = scribe_bin()
-        .args(["--db", &db_str, "query", "--event", "PreToolUse", "--limit", "50", "--json"])
+        .args([
+            "--db",
+            &db_str,
+            "query",
+            "--event",
+            "PreToolUse",
+            "--limit",
+            "50",
+            "--json",
+        ])
         .output()
         .unwrap();
 
