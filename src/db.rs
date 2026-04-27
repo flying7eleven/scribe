@@ -3085,7 +3085,12 @@ pub async fn batch_get_classifications(
 
 /// Check if an event already exists by the dedup composite key.
 /// Returns the event ID if found.
+///
+/// Deprecated: merge_bundles() now uses INSERT OR IGNORE with the unique
+/// index for dedup (US-0074). This function is retained for potential
+/// diagnostic use but is no longer called in the sync hot path.
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn check_event_exists(
     pool: &SqlitePool,
     account_id: &str,
@@ -3107,7 +3112,11 @@ pub async fn check_event_exists(
 
 /// Insert a synced event (from a remote machine).
 /// Returns the new local event ID.
+///
+/// Deprecated: merge_bundles() now inlines the INSERT OR IGNORE (US-0074).
+/// Retained for potential standalone use.
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn insert_synced_event(
     pool: &SqlitePool,
     event: &crate::sync::bundle::EventRow,
@@ -3135,7 +3144,9 @@ pub async fn insert_synced_event(
 }
 
 /// Insert a classification linked to a synced event.
+/// Deprecated: merge_bundles() now uses insert_synced_classification_tx() (US-0074).
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn insert_synced_classification(
     pool: &SqlitePool,
     event_id: i64,
@@ -3158,7 +3169,9 @@ pub async fn insert_synced_classification(
 }
 
 /// Insert an enforcement from a synced bundle (rule_id = NULL).
+/// Deprecated: merge_bundles() now uses insert_synced_enforcement_tx() (US-0074).
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn insert_synced_enforcement(
     pool: &SqlitePool,
     e: &crate::sync::bundle::EnforcementRow,

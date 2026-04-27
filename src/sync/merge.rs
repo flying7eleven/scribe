@@ -1,4 +1,5 @@
 #![allow(dead_code)] // Functions used by cmd_sync import handler
+use std::collections::HashSet;
 use std::error::Error;
 
 use sqlx::SqlitePool;
@@ -15,11 +16,16 @@ pub struct MergeStats {
 }
 
 /// Merge a stream of EventBundles into the local database.
-/// Returns statistics about the merge operation.
+///
+/// Uses `INSERT OR IGNORE` with the existing unique dedup index
+/// `(session_id, timestamp, event_type)` to skip duplicates without
+/// per-event SELECT queries. Returns merge statistics and the set of
+/// `(account_id, session_id)` pairs that received new events (for
+/// incremental sessions update in US-0075).
 pub async fn merge_bundles(
     pool: &SqlitePool,
     bundles: impl Iterator<Item = Result<EventBundle, Box<dyn Error>>>,
-) -> Result<MergeStats, Box<dyn Error>> {
+) -> Result<(MergeStats, HashSet<(String, String)>), Box<dyn Error>> {
     let mut stats = MergeStats {
         events_imported: 0,
         events_skipped: 0,
@@ -27,6 +33,9 @@ pub async fn merge_bundles(
         enforcements_imported: 0,
         errors: 0,
     };
+    let mut affected_sessions: HashSet<(String, String)> = HashSet::new();
+
+    let mut tx = pool.begin().await?;
 
     for result in bundles {
         let bundle = match result {
@@ -38,67 +47,135 @@ pub async fn merge_bundles(
             }
         };
 
-        match merge_single_bundle(pool, bundle, &mut stats).await {
-            Ok(()) => {}
+        // INSERT OR IGNORE — let the unique index handle dedup
+        let insert_result = sqlx::query(
+            "INSERT OR IGNORE INTO events (timestamp, session_id, event_type, tool_name, \
+             tool_input, tool_response, cwd, permission_mode, raw_payload, \
+             origin_machine_id, account_id, account_email) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&bundle.event.timestamp)
+        .bind(&bundle.event.session_id)
+        .bind(&bundle.event.event_type)
+        .bind(&bundle.event.tool_name)
+        .bind(&bundle.event.tool_input)
+        .bind(&bundle.event.tool_response)
+        .bind(&bundle.event.cwd)
+        .bind(&bundle.event.permission_mode)
+        .bind(&bundle.event.raw_payload)
+        .bind(&bundle.event.origin_machine_id)
+        .bind(bundle.event.account_id.as_deref().unwrap_or("default"))
+        .bind(bundle.event.account_email.as_deref())
+        .execute(&mut *tx)
+        .await;
+
+        let insert_result = match insert_result {
+            Ok(r) => r,
             Err(e) => {
-                eprintln!("Warning: failed to merge bundle: {e}");
+                eprintln!("Warning: failed to insert event: {e}");
                 stats.errors += 1;
+                continue;
+            }
+        };
+
+        if insert_result.rows_affected() == 0 {
+            // Duplicate — unique constraint triggered INSERT OR IGNORE
+            stats.events_skipped += 1;
+            continue;
+        }
+
+        // New event inserted successfully
+        let event_id = insert_result.last_insert_rowid();
+        stats.events_imported += 1;
+        affected_sessions.insert((
+            bundle
+                .event
+                .account_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            bundle.event.session_id.clone(),
+        ));
+
+        // Insert detail rows
+        if let Err(e) = insert_detail_row_tx(&mut tx, event_id, &bundle).await {
+            eprintln!("Warning: failed to insert detail row: {e}");
+            // Don't increment errors — the event itself was inserted successfully
+        }
+
+        // Insert classifications with remapped event_id
+        for classification in &bundle.classifications {
+            if let Err(e) = insert_synced_classification_tx(&mut tx, event_id, classification).await
+            {
+                eprintln!("Warning: failed to insert classification: {e}");
+            } else {
+                stats.classifications_imported += 1;
+            }
+        }
+
+        // Insert enforcements (rule_id = NULL)
+        for enforcement in &bundle.enforcements {
+            if let Err(e) = insert_synced_enforcement_tx(&mut tx, enforcement).await {
+                eprintln!("Warning: failed to insert enforcement: {e}");
+            } else {
+                stats.enforcements_imported += 1;
             }
         }
     }
 
+    tx.commit().await?;
+
     // Rebuild sessions table after merge
     crate::db::rebuild_sessions(pool).await?;
 
-    Ok(stats)
+    Ok((stats, affected_sessions))
 }
 
-/// Merge a single EventBundle into the database.
-async fn merge_single_bundle(
-    pool: &SqlitePool,
-    bundle: EventBundle,
-    stats: &mut MergeStats,
+/// Insert a classification within a transaction.
+async fn insert_synced_classification_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_id: i64,
+    c: &ClassificationRow,
 ) -> Result<(), Box<dyn Error>> {
-    // Dedup check
-    let existing = crate::db::check_event_exists(
-        pool,
-        bundle.event.account_id.as_deref().unwrap_or("default"),
-        &bundle.event.session_id,
-        &bundle.event.timestamp,
-        &bundle.event.event_type,
+    sqlx::query(
+        "INSERT INTO classifications (timestamp, event_id, tool_name, input_pattern, \
+         risk_level, reason, heuristic) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
+    .bind(&c.timestamp)
+    .bind(event_id)
+    .bind(&c.tool_name)
+    .bind(&c.input_pattern)
+    .bind(&c.risk_level)
+    .bind(&c.reason)
+    .bind(&c.heuristic)
+    .execute(&mut **tx)
     .await?;
-
-    if existing.is_some() {
-        stats.events_skipped += 1;
-        return Ok(());
-    }
-
-    // Insert event
-    let event_id = crate::db::insert_synced_event(pool, &bundle.event).await?;
-    stats.events_imported += 1;
-
-    // Insert detail rows
-    insert_detail_row(pool, event_id, &bundle).await?;
-
-    // Insert classifications with remapped event_id
-    for classification in &bundle.classifications {
-        crate::db::insert_synced_classification(pool, event_id, classification).await?;
-        stats.classifications_imported += 1;
-    }
-
-    // Insert enforcements (rule_id = NULL)
-    for enforcement in &bundle.enforcements {
-        crate::db::insert_synced_enforcement(pool, enforcement).await?;
-        stats.enforcements_imported += 1;
-    }
-
     Ok(())
 }
 
-/// Insert the appropriate detail row based on event type.
-async fn insert_detail_row(
-    pool: &SqlitePool,
+/// Insert an enforcement within a transaction (rule_id = NULL).
+async fn insert_synced_enforcement_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    e: &EnforcementRow,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO enforcements (timestamp, session_id, tool_name, tool_input, \
+         action, reason, evaluation_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&e.timestamp)
+    .bind(&e.session_id)
+    .bind(&e.tool_name)
+    .bind(&e.tool_input)
+    .bind(&e.action)
+    .bind(&e.reason)
+    .bind(e.evaluation_ms)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Insert the appropriate detail row based on event type (within a transaction).
+async fn insert_detail_row_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_id: i64,
     bundle: &EventBundle,
 ) -> Result<(), Box<dyn Error>> {
@@ -118,27 +195,27 @@ async fn insert_detail_row(
                 .bind(&d.error_details)
                 .bind(d.is_interrupt.map(|b| b as i32))
                 .bind(&d.permission_suggestions)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
         "Stop" | "StopFailure" => {
             if let Some(ref d) = bundle.stop_details {
-                insert_stop_detail(pool, event_id, d).await?;
+                insert_stop_detail_tx(tx, event_id, d).await?;
             }
         }
         "SubagentStop" => {
             // Dual insert: stop + agent
             if let Some(ref d) = bundle.stop_details {
-                insert_stop_detail(pool, event_id, d).await?;
+                insert_stop_detail_tx(tx, event_id, d).await?;
             }
             if let Some(ref d) = bundle.agent_details {
-                insert_agent_detail(pool, event_id, d).await?;
+                insert_agent_detail_tx(tx, event_id, d).await?;
             }
         }
         "SubagentStart" => {
             if let Some(ref d) = bundle.agent_details {
-                insert_agent_detail(pool, event_id, d).await?;
+                insert_agent_detail_tx(tx, event_id, d).await?;
             }
         }
         "SessionStart" | "SessionEnd" | "ConfigChange" => {
@@ -153,7 +230,7 @@ async fn insert_detail_row(
                 .bind(&d.model)
                 .bind(&d.reason)
                 .bind(&d.file_path)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -176,7 +253,7 @@ async fn insert_detail_row(
                 .bind(&d.requested_schema)
                 .bind(&d.action)
                 .bind(&d.content)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -191,7 +268,7 @@ async fn insert_detail_row(
                 .bind(&d.trigger)
                 .bind(&d.custom_instructions)
                 .bind(&d.compact_summary)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -209,7 +286,7 @@ async fn insert_detail_row(
                 .bind(&d.globs)
                 .bind(&d.trigger_file_path)
                 .bind(&d.parent_file_path)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -226,7 +303,7 @@ async fn insert_detail_row(
                 .bind(&d.task_id)
                 .bind(&d.task_subject)
                 .bind(&d.task_description)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -237,7 +314,7 @@ async fn insert_detail_row(
                 )
                 .bind(event_id)
                 .bind(&d.prompt)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -248,7 +325,7 @@ async fn insert_detail_row(
                 )
                 .bind(event_id)
                 .bind(&d.worktree_path)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
             }
         }
@@ -258,8 +335,8 @@ async fn insert_detail_row(
     Ok(())
 }
 
-async fn insert_stop_detail(
-    pool: &SqlitePool,
+async fn insert_stop_detail_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_id: i64,
     d: &StopEventDetails,
 ) -> Result<(), Box<dyn Error>> {
@@ -273,13 +350,13 @@ async fn insert_stop_detail(
     .bind(&d.last_assistant_message)
     .bind(&d.error)
     .bind(&d.error_details)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn insert_agent_detail(
-    pool: &SqlitePool,
+async fn insert_agent_detail_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_id: i64,
     d: &AgentEventDetails,
 ) -> Result<(), Box<dyn Error>> {
@@ -292,7 +369,7 @@ async fn insert_agent_detail(
     .bind(&d.agent_id)
     .bind(&d.agent_type)
     .bind(&d.agent_transcript_path)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -348,7 +425,7 @@ mod tests {
             Ok(make_event_bundle("s2", "Stop", "2026-01-01T00:00:01.000Z")),
         ];
 
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 2);
         assert_eq!(stats.events_skipped, 0);
         assert_eq!(stats.errors, 0);
@@ -364,7 +441,7 @@ mod tests {
             "Stop",
             "2026-01-01T00:00:00.000Z",
         ))];
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 1);
 
         // Insert same again — should be skipped
@@ -373,7 +450,7 @@ mod tests {
             "Stop",
             "2026-01-01T00:00:00.000Z",
         ))];
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 0);
         assert_eq!(stats.events_skipped, 1);
     }
@@ -395,7 +472,7 @@ mod tests {
             Ok(make_event_bundle("s1", "Stop", "2026-01-01T00:00:00.000Z")), // dup
             Ok(make_event_bundle("s2", "Stop", "2026-01-01T00:00:01.000Z")), // new
         ];
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 1);
         assert_eq!(stats.events_skipped, 1);
     }
@@ -414,7 +491,7 @@ mod tests {
             permission_suggestions: None,
         });
 
-        let stats = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
+        let (stats, _affected) = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
             .await
             .unwrap();
         assert_eq!(stats.events_imported, 1);
@@ -445,7 +522,7 @@ mod tests {
             agent_transcript_path: None,
         });
 
-        let stats = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
+        let (stats, _affected) = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
             .await
             .unwrap();
         assert_eq!(stats.events_imported, 1);
@@ -477,7 +554,7 @@ mod tests {
             heuristic: "bash_destructive".into(),
         }];
 
-        let stats = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
+        let (stats, _affected) = merge_bundles(&pool, vec![Ok(bundle)].into_iter())
             .await
             .unwrap();
         assert_eq!(stats.events_imported, 1);
@@ -531,7 +608,7 @@ mod tests {
     async fn test_merge_empty_stream() {
         let (pool, _dir) = setup_merge_db().await;
         let bundles: Vec<Result<EventBundle, Box<dyn Error>>> = vec![];
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 0);
         assert_eq!(stats.events_skipped, 0);
         assert_eq!(stats.errors, 0);
@@ -546,8 +623,88 @@ mod tests {
             Ok(make_event_bundle("s1", "Stop", "2026-01-01T00:00:00.000Z")),
         ];
 
-        let stats = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        let (stats, _affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
         assert_eq!(stats.events_imported, 1);
         assert_eq!(stats.errors, 1);
+    }
+
+    #[tokio::test]
+    async fn test_merge_large_scale_dedup() {
+        // US-0074: Import 1000 bundles where 900 are duplicates
+        let (pool, _dir) = setup_merge_db().await;
+
+        // First: insert 900 unique events
+        let initial_bundles: Vec<Result<EventBundle, Box<dyn Error>>> = (0..900)
+            .map(|i| {
+                Ok(make_event_bundle(
+                    &format!("s-{}", i),
+                    "Stop",
+                    &format!("2026-01-01T00:{:02}:{:02}.000Z", i / 60, i % 60),
+                ))
+            })
+            .collect();
+
+        let (stats, affected) = merge_bundles(&pool, initial_bundles.into_iter())
+            .await
+            .unwrap();
+        assert_eq!(stats.events_imported, 900);
+        assert_eq!(stats.events_skipped, 0);
+        assert_eq!(affected.len(), 900);
+
+        // Now: import 1000 bundles — 900 duplicates + 100 new
+        let mixed_bundles: Vec<Result<EventBundle, Box<dyn Error>>> = (0..1000)
+            .map(|i| {
+                if i < 900 {
+                    // Duplicate — same session/timestamp/event_type as initial
+                    Ok(make_event_bundle(
+                        &format!("s-{}", i),
+                        "Stop",
+                        &format!("2026-01-01T00:{:02}:{:02}.000Z", i / 60, i % 60),
+                    ))
+                } else {
+                    // New event
+                    Ok(make_event_bundle(
+                        &format!("s-new-{}", i),
+                        "PreToolUse",
+                        &format!(
+                            "2026-01-02T00:{:02}:{:02}.000Z",
+                            (i - 900) / 60,
+                            (i - 900) % 60
+                        ),
+                    ))
+                }
+            })
+            .collect();
+
+        let (stats, affected) = merge_bundles(&pool, mixed_bundles.into_iter())
+            .await
+            .unwrap();
+        assert_eq!(stats.events_imported, 100);
+        assert_eq!(stats.events_skipped, 900);
+        assert_eq!(stats.errors, 0);
+        // Only the 100 new sessions should be affected
+        assert_eq!(affected.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_merge_affected_sessions_tracked() {
+        let (pool, _dir) = setup_merge_db().await;
+
+        let bundles = vec![
+            Ok(make_event_bundle("s1", "Stop", "2026-01-01T00:00:00.000Z")),
+            Ok(make_event_bundle(
+                "s1",
+                "PreToolUse",
+                "2026-01-01T00:00:01.000Z",
+            )),
+            Ok(make_event_bundle("s2", "Stop", "2026-01-01T00:01:00.000Z")),
+        ];
+
+        let (_stats, affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+
+        // Two distinct sessions affected
+        assert_eq!(affected.len(), 2);
+        assert!(affected.contains(&("default".to_string(), "s1".to_string())));
+        assert!(affected.contains(&("default".to_string(), "s2".to_string())));
     }
 }

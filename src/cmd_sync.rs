@@ -182,7 +182,7 @@ async fn handle_import(pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
     let reader = BufReader::new(plaintext.as_slice());
     let bundles = bundle::import_bundles(reader);
 
-    let stats = merge::merge_bundles(pool, bundles).await?;
+    let (stats, _affected_sessions) = merge::merge_bundles(pool, bundles).await?;
 
     eprintln!(
         "Imported {} events (skipped {}, errors {})",

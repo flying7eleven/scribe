@@ -644,9 +644,7 @@ mod tests {
 
         // Parse back and verify detail tables were populated
         let reader = BufReader::new(Cursor::new(output));
-        let bundles: Vec<EventBundle> = import_bundles(reader)
-            .filter_map(|r| r.ok())
-            .collect();
+        let bundles: Vec<EventBundle> = import_bundles(reader).filter_map(|r| r.ok()).collect();
 
         assert_eq!(bundles.len(), 3);
 
@@ -697,10 +695,7 @@ mod tests {
 
         // All bundles should have origin_machine_id filled in
         for bundle in &bundles {
-            assert_eq!(
-                bundle.event.origin_machine_id,
-                Some("test-machine".into())
-            );
+            assert_eq!(bundle.event.origin_machine_id, Some("test-machine".into()));
         }
     }
 
@@ -744,9 +739,7 @@ mod tests {
 
         // Verify all 10 bundles are distinct and valid
         let reader = BufReader::new(Cursor::new(output));
-        let bundles: Vec<EventBundle> = import_bundles(reader)
-            .filter_map(|r| r.ok())
-            .collect();
+        let bundles: Vec<EventBundle> = import_bundles(reader).filter_map(|r| r.ok()).collect();
         assert_eq!(bundles.len(), 10);
 
         // Verify uniqueness of session_ids
