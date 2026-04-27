@@ -240,6 +240,77 @@ pub fn decrypt_stream<R: std::io::Read, W: std::io::Write>(
     Ok(())
 }
 
+// ── Compressed Encryption / Decryption (v2 format) ──
+
+/// Sync stream format version bytes.
+pub const FORMAT_V2: u8 = 0x02;
+
+/// Compress with zstd (level 3) then encrypt with age.
+/// Prepends version byte 0x02 to the output stream.
+pub fn compress_encrypt_stream<R: std::io::Read, W: std::io::Write>(
+    mut input: R,
+    mut output: W,
+) -> Result<(), Box<dyn Error>> {
+    output.write_all(&[FORMAT_V2])?;
+
+    let recipients = all_recipients()?;
+    if recipients.is_empty() {
+        return Err("no recipients found — generate a keypair first".into());
+    }
+
+    let encryptor =
+        age::Encryptor::with_recipients(recipients.iter().map(|r| r as &dyn age::Recipient))
+            .map_err(|_| "failed to create encryptor")?;
+    let age_writer = encryptor
+        .wrap_output(&mut output)
+        .map_err(|e| format!("failed to wrap output: {e}"))?;
+
+    let mut zstd_encoder =
+        zstd::stream::Encoder::new(age_writer, 3).map_err(|e| format!("zstd init failed: {e}"))?;
+    std::io::copy(&mut input, &mut zstd_encoder)?;
+    let age_writer = zstd_encoder
+        .finish()
+        .map_err(|e| format!("zstd finalize failed: {e}"))?;
+    age_writer
+        .finish()
+        .map_err(|e| format!("age finalize failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Auto-detect format version and decrypt (+ decompress if v2).
+/// - If first byte is 0x02: age-decrypt then zstd-decompress.
+/// - Otherwise (legacy v1): prepend byte back and age-decrypt without decompression.
+pub fn auto_decrypt_stream<R: std::io::Read, W: std::io::Write>(
+    mut input: R,
+    mut output: W,
+) -> Result<(), Box<dyn Error>> {
+    let mut version = [0u8; 1];
+    input.read_exact(&mut version)?;
+
+    match version[0] {
+        FORMAT_V2 => {
+            // v2: remaining bytes are age-encrypted zstd data
+            let identity = local_identity()?;
+            let decryptor = age::Decryptor::new(&mut input)
+                .map_err(|e| format!("failed to parse encrypted data: {e}"))?;
+            let age_reader = decryptor
+                .decrypt(std::iter::once(&identity as &dyn age::Identity))
+                .map_err(|e| format!("decryption failed — check keypair exchange: {e}"))?;
+            let mut zstd_decoder = zstd::stream::Decoder::new(age_reader)
+                .map_err(|e| format!("zstd decompress init failed: {e}"))?;
+            std::io::copy(&mut zstd_decoder, &mut output)?;
+        }
+        other => {
+            // v1 (legacy): prepend the byte back, then decrypt without decompression
+            let chained = std::io::Cursor::new([other]).chain(input);
+            decrypt_stream(chained, &mut output)?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +545,126 @@ mod tests {
         let decryptor = age::Decryptor::new(ciphertext.as_slice()).unwrap();
         let result = decryptor.decrypt(std::iter::once(&id_wrong as &dyn age::Identity));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compress_encrypt_decrypt_roundtrip() {
+        // Test the v2 pipeline: compress+encrypt → auto_decrypt (detects v2)
+        let identity = x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let plaintext = b"Hello world! ".repeat(1000); // Repetitive data compresses well
+
+        // We can't use compress_encrypt_stream directly since it calls all_recipients()
+        // which needs file system state. Instead, test the pipeline manually.
+
+        // Step 1: Compress with zstd
+        let mut compressed = Vec::new();
+        let mut encoder = zstd::stream::Encoder::new(&mut compressed, 3).unwrap();
+        std::io::Write::write_all(&mut encoder, &plaintext).unwrap();
+        encoder.finish().unwrap();
+
+        // Verify compression actually reduced size
+        assert!(
+            compressed.len() < plaintext.len() / 3,
+            "compressed ({}) should be much smaller than plaintext ({})",
+            compressed.len(),
+            plaintext.len()
+        );
+
+        // Step 2: Encrypt the compressed data
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                .unwrap();
+        let mut ciphertext = Vec::new();
+        ciphertext.push(FORMAT_V2); // Prepend version byte
+        let mut age_writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+        std::io::Write::write_all(&mut age_writer, &compressed).unwrap();
+        age_writer.finish().unwrap();
+
+        // Step 3: Verify first byte is FORMAT_V2
+        assert_eq!(ciphertext[0], FORMAT_V2);
+
+        // Step 4: Decrypt+decompress using auto_decrypt_stream logic
+        // (manual version since auto_decrypt_stream calls local_identity())
+        let mut input = ciphertext.as_slice();
+        let mut version = [0u8; 1];
+        std::io::Read::read_exact(&mut input, &mut version).unwrap();
+        assert_eq!(version[0], FORMAT_V2);
+
+        let decryptor = age::Decryptor::new(input).unwrap();
+        let age_reader = decryptor
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .unwrap();
+        let mut zstd_decoder = zstd::stream::Decoder::new(age_reader).unwrap();
+        let mut decrypted = Vec::new();
+        std::io::Read::read_to_end(&mut zstd_decoder, &mut decrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_auto_decrypt_v1_backward_compat() {
+        // Test that v1 (legacy) data — which starts with the age header — still decrypts
+        let identity = x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let plaintext = b"Legacy v1 data without compression";
+
+        // Encrypt without version byte (v1 format)
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                .unwrap();
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+        std::io::Write::write_all(&mut writer, plaintext).unwrap();
+        writer.finish().unwrap();
+
+        // v1 data starts with 'a' (0x61) from "age-encryption.org"
+        assert_eq!(ciphertext[0], b'a');
+
+        // Auto-detect should detect v1 and decrypt without decompression
+        // (manual test since auto_decrypt_stream calls local_identity())
+        let mut input = ciphertext.as_slice();
+        let mut version = [0u8; 1];
+        std::io::Read::read_exact(&mut input, &mut version).unwrap();
+        assert_ne!(version[0], FORMAT_V2); // Not v2
+
+        // Prepend byte back and decrypt
+        let chained = std::io::Cursor::new([version[0]]).chain(input);
+        let decryptor = age::Decryptor::new(chained).unwrap();
+        let mut reader = decryptor
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .unwrap();
+        let mut decrypted = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut decrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_compression_ratio_on_json_data() {
+        // Verify that typical JSON Lines event data compresses well with zstd
+        let event_json = r#"{"timestamp":"2026-01-01T00:00:00.000Z","session_id":"sess-abc123","event_type":"PreToolUse","tool_name":"Bash","tool_input":"{\"command\":\"ls -la\"}","cwd":"/Users/test/project","permission_mode":"default","raw_payload":"{\"session_id\":\"sess-abc123\",\"hook_event_name\":\"PreToolUse\"}"}"#;
+
+        // Simulate 1000 events (typical sync payload)
+        let mut plaintext = Vec::new();
+        for _ in 0..1000 {
+            plaintext.extend_from_slice(event_json.as_bytes());
+            plaintext.push(b'\n');
+        }
+
+        let mut compressed = Vec::new();
+        let mut encoder = zstd::stream::Encoder::new(&mut compressed, 3).unwrap();
+        std::io::Write::write_all(&mut encoder, &plaintext).unwrap();
+        encoder.finish().unwrap();
+
+        let ratio = plaintext.len() as f64 / compressed.len() as f64;
+        // JSON data should compress at least 5x with zstd
+        assert!(
+            ratio > 5.0,
+            "compression ratio {:.1}x is lower than expected 5x (uncompressed: {}, compressed: {})",
+            ratio,
+            plaintext.len(),
+            compressed.len()
+        );
     }
 }

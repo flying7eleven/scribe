@@ -37,6 +37,9 @@ pub enum SyncCommand {
         /// Only export events after this timestamp
         #[arg(long)]
         since: Option<String>,
+        /// Disable zstd compression (for interop with older peers)
+        #[arg(long)]
+        no_compress: bool,
     },
     /// Import encrypted sync bundle from stdin
     #[clap(hide = true)]
@@ -72,7 +75,7 @@ pub enum KeypairCommand {
 pub async fn handle(cmd: SyncCommand, pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
     match cmd {
         SyncCommand::Keypair { command } => handle_keypair(command, pool).await,
-        SyncCommand::Export { since } => handle_export(pool, since).await,
+        SyncCommand::Export { since, no_compress } => handle_export(pool, since, no_compress).await,
         SyncCommand::Import => handle_import(pool).await,
         SyncCommand::Push { remote, since } => {
             let result = transport::push(pool, &remote, since.as_deref()).await?;
@@ -148,17 +151,27 @@ async fn handle_keypair(cmd: KeypairCommand, pool: &SqlitePool) -> Result<(), Bo
     Ok(())
 }
 
-async fn handle_export(pool: &SqlitePool, since: Option<String>) -> Result<(), Box<dyn Error>> {
+async fn handle_export(
+    pool: &SqlitePool,
+    since: Option<String>,
+    no_compress: bool,
+) -> Result<(), Box<dyn Error>> {
     let machine_id = crypto::machine_id()?;
 
     // Export events to an in-memory plaintext buffer
     let mut plaintext = Vec::new();
     let count = bundle::export_bundles(pool, since.as_deref(), &machine_id, &mut plaintext).await?;
 
-    // Encrypt to stdout
+    // Encrypt (with or without compression) to stdout
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
-    crypto::encrypt_stream(plaintext.as_slice(), stdout_lock)?;
+    if no_compress {
+        // v1 format: raw age encryption (backward compat with older peers)
+        crypto::encrypt_stream(plaintext.as_slice(), stdout_lock)?;
+    } else {
+        // v2 format: zstd + age (default)
+        crypto::compress_encrypt_stream(plaintext.as_slice(), stdout_lock)?;
+    }
 
     eprintln!("Exported {count} events");
     Ok(())
@@ -174,9 +187,9 @@ async fn handle_import(pool: &SqlitePool) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // Decrypt
+    // Auto-detect format (v1 or v2) and decrypt (+decompress if v2)
     let mut plaintext = Vec::new();
-    crypto::decrypt_stream(ciphertext.as_slice(), &mut plaintext)?;
+    crypto::auto_decrypt_stream(ciphertext.as_slice(), &mut plaintext)?;
 
     // Parse JSON Lines and merge
     let reader = BufReader::new(plaintext.as_slice());
