@@ -3194,7 +3194,9 @@ pub async fn insert_synced_enforcement(
 
 /// Rebuild the sessions table from events.
 /// Deletes all existing session rows and recomputes from events.
+/// Retained as a repair fallback (US-0075). Normal merge uses update_sessions_incremental().
 #[cfg(feature = "sync")]
+#[allow(dead_code)]
 pub async fn rebuild_sessions(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("DELETE FROM sessions").execute(pool).await?;
 
@@ -3218,6 +3220,61 @@ pub async fn rebuild_sessions(pool: &SqlitePool) -> Result<(), Box<dyn std::erro
     )
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+/// Incrementally update only the sessions that received new events.
+/// Uses INSERT ... ON CONFLICT DO UPDATE to upsert affected sessions.
+/// Chunks by 200 to stay within SQLite's bind-variable limit.
+#[cfg(feature = "sync")]
+pub async fn update_sessions_incremental(
+    pool: &SqlitePool,
+    affected_sessions: &std::collections::HashSet<(String, String)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if affected_sessions.is_empty() {
+        return Ok(());
+    }
+
+    const CHUNK_SIZE: usize = 200;
+    let sessions: Vec<&(String, String)> = affected_sessions.iter().collect();
+
+    for chunk in sessions.chunks(CHUNK_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "(?, ?)").collect();
+        let in_clause = placeholders.join(", ");
+
+        let sql = format!(
+            "INSERT INTO sessions (account_id, session_id, first_seen, last_seen, cwd, event_count, account_email) \
+             SELECT \
+                 account_id, \
+                 session_id, \
+                 MIN(timestamp) AS first_seen, \
+                 MAX(timestamp) AS last_seen, \
+                 (SELECT cwd FROM events e2 \
+                  WHERE e2.account_id = events.account_id AND e2.session_id = events.session_id \
+                  ORDER BY e2.timestamp DESC LIMIT 1) AS cwd, \
+                 COUNT(*) AS event_count, \
+                 (SELECT account_email FROM events e3 \
+                  WHERE e3.account_id = events.account_id AND e3.session_id = events.session_id \
+                  AND e3.account_email IS NOT NULL \
+                  ORDER BY e3.timestamp DESC LIMIT 1) AS account_email \
+             FROM events \
+             WHERE (account_id, session_id) IN ({in_clause}) \
+             GROUP BY account_id, session_id \
+             ON CONFLICT(account_id, session_id) DO UPDATE SET \
+                 first_seen = excluded.first_seen, \
+                 last_seen = excluded.last_seen, \
+                 cwd = excluded.cwd, \
+                 event_count = excluded.event_count, \
+                 account_email = excluded.account_email"
+        );
+
+        let mut query = sqlx::query(&sql);
+        for (account_id, session_id) in chunk {
+            query = query.bind(account_id).bind(session_id);
+        }
+        query.execute(pool).await?;
+    }
 
     Ok(())
 }

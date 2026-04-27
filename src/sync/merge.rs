@@ -124,8 +124,8 @@ pub async fn merge_bundles(
 
     tx.commit().await?;
 
-    // Rebuild sessions table after merge
-    crate::db::rebuild_sessions(pool).await?;
+    // Incrementally update only affected sessions (US-0075)
+    crate::db::update_sessions_incremental(pool, &affected_sessions).await?;
 
     Ok((stats, affected_sessions))
 }
@@ -706,5 +706,131 @@ mod tests {
         assert_eq!(affected.len(), 2);
         assert!(affected.contains(&("default".to_string(), "s1".to_string())));
         assert!(affected.contains(&("default".to_string(), "s2".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_incremental_sessions_only_updates_affected() {
+        // US-0075: Insert events into 1000 sessions, then sync 50 events spanning
+        // 5 new sessions — verify only those 5 are added, the other 1000 unchanged.
+        let (pool, _dir) = setup_merge_db().await;
+
+        // Pre-populate 1000 sessions via direct event inserts
+        for i in 0..1000 {
+            let payload = serde_json::json!({
+                "session_id": format!("existing-{}", i),
+                "hook_event_name": "SessionStart",
+                "cwd": format!("/project/{}", i),
+                "source": "startup",
+                "permission_mode": "default"
+            });
+            let hook_input: crate::models::HookInput =
+                serde_json::from_value(payload.clone()).unwrap();
+            crate::db::insert_event(
+                &pool,
+                &hook_input,
+                &serde_json::to_string(&payload).unwrap(),
+                "default",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Verify 1000 sessions exist
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1000);
+
+        // Record a session's event_count before merge (should be 1)
+        let before: (i64,) =
+            sqlx::query_as("SELECT event_count FROM sessions WHERE session_id = 'existing-500'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before.0, 1);
+
+        // Now merge 50 events spanning 5 NEW sessions (10 events each)
+        let bundles: Vec<Result<EventBundle, Box<dyn Error>>> = (0..50)
+            .map(|i| {
+                let session_idx = i / 10; // 5 sessions, 10 events each
+                Ok(make_event_bundle(
+                    &format!("new-session-{}", session_idx),
+                    "PreToolUse",
+                    &format!("2026-02-01T00:{:02}:{:02}.000Z", session_idx, i % 10),
+                ))
+            })
+            .collect();
+
+        let (stats, affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        assert_eq!(stats.events_imported, 50);
+        assert_eq!(affected.len(), 5);
+
+        // Verify we now have 1005 sessions total
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1005);
+
+        // Verify the 5 new sessions have correct event_count
+        for i in 0..5 {
+            let row: (i64,) =
+                sqlx::query_as("SELECT event_count FROM sessions WHERE session_id = ?")
+                    .bind(format!("new-session-{}", i))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(row.0, 10, "new-session-{} should have 10 events", i);
+        }
+
+        // Verify existing sessions are untouched (still event_count = 1)
+        let after: (i64,) =
+            sqlx::query_as("SELECT event_count FROM sessions WHERE session_id = 'existing-500'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_incremental_sessions_skips_when_all_duplicates() {
+        let (pool, _dir) = setup_merge_db().await;
+
+        // Insert one event
+        let bundles = vec![Ok(make_event_bundle(
+            "s1",
+            "Stop",
+            "2026-01-01T00:00:00.000Z",
+        ))];
+        let (stats, _) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        assert_eq!(stats.events_imported, 1);
+
+        // Record session state
+        let before: (String,) =
+            sqlx::query_as("SELECT last_seen FROM sessions WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // Merge same event again (duplicate)
+        let bundles = vec![Ok(make_event_bundle(
+            "s1",
+            "Stop",
+            "2026-01-01T00:00:00.000Z",
+        ))];
+        let (stats, affected) = merge_bundles(&pool, bundles.into_iter()).await.unwrap();
+        assert_eq!(stats.events_skipped, 1);
+        assert_eq!(stats.events_imported, 0);
+        assert!(affected.is_empty());
+
+        // Session should be unchanged
+        let after: (String,) =
+            sqlx::query_as("SELECT last_seen FROM sessions WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before.0, after.0);
     }
 }
